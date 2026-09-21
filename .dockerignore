@@ -1,0 +1,10 @@
+# Allowlist: local keys, worlds, logs, caches and agent/session data never enter build context.
+**
+!Dockerfile
+!package.json
+!package-lock.json
+!index.js
+!src/
+!src/**
+!public/
+!public/**

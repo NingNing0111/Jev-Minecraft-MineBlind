@@ -1,0 +1,75 @@
+name: mineblind
+
+services:
+  minecraft:
+    image: itzg/minecraft-server:java17
+    environment:
+      # Read https://aka.ms/MinecraftEULA before setting MINECRAFT_EULA=TRUE.
+      EULA: "${MINECRAFT_EULA:-FALSE}"
+      TYPE: VANILLA
+      VERSION: "1.20.1"
+      MEMORY: "${MC_MEMORY:-2G}"
+      ONLINE_MODE: "FALSE"
+      ENABLE_RCON: "FALSE"
+      DIFFICULTY: normal
+      MODE: survival
+      MAX_PLAYERS: "5"
+      VIEW_DISTANCE: "6"
+      SIMULATION_DISTANCE: "4"
+      SPAWN_PROTECTION: "0"
+      SEED: "${MC_SEED:-}"
+    ports:
+      - "${BIND_IP:-127.0.0.1}:25565:25565"
+    volumes:
+      - minecraft-data:/data
+    healthcheck:
+      test: ["CMD", "mc-health"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 120s
+    restart: unless-stopped
+    stop_grace_period: 120s
+    mem_limit: "${MC_CONTAINER_MEMORY:-3G}"
+
+  mineblind:
+    build:
+      context: .
+      target: runtime
+    init: true
+    # Existing .env keys stay on the host; no .env is copied into the image.
+    env_file: .env
+    environment:
+      MC_HOST: minecraft
+      MC_PORT: "25565"
+      MC_VERSION: "1.20.1"
+      MC_AUTH: offline
+      WEB_PORT: "3010"
+      VIEWER_PORT: "3011"
+      SAVE_DIR: /app/saves
+      KNOWLEDGE_DIR: /app/knowledge
+      WORLD_ID: "${WORLD_ID:-docker-world}"
+    ports:
+      - "${BIND_IP:-127.0.0.1}:3010:3010"
+      - "${BIND_IP:-127.0.0.1}:3011:3011"
+    volumes:
+      - agent-saves:/app/saves
+      - agent-knowledge:/app/knowledge
+    depends_on:
+      minecraft:
+        condition: service_healthy
+        restart: true
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3010/api/status',{signal:AbortSignal.timeout(4000)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+    restart: unless-stopped
+    stop_grace_period: 60s
+    mem_limit: "${BOT_CONTAINER_MEMORY:-2G}"
+
+volumes:
+  minecraft-data:
+  agent-saves:
+  agent-knowledge:
