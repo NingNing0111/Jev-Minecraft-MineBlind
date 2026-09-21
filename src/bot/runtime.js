@@ -7,6 +7,7 @@ const { createPlanner } = require('../agent/planner');
 const { SkillExecutor } = require('../skills/executor');
 const { ActionArbiter, reflex } = require('./arbiter');
 const { extractState } = require('../perception');
+const { EventQueue } = require('./events');
 class Runtime {
   constructor(bot, config, broadcast = () => {}) {
     this.bot = bot; this.config = config; this.broadcast = broadcast;
@@ -14,13 +15,16 @@ class Runtime {
     const saved = config.restore ? this.saveSystem.restore(config.restore) : {};
     this.run = new RunMemory(saved.run_memory); this.world = new WorldModel(saved.world_model);
     this.working = new WorkingMemory(); this.manager = new GoalManager(config.stagnationMs, saved.goal_manager);
-    this.plan = saved.agent_plan || null; this.events = ['startup']; this.epoch = 0; this.stopped = false; this.paused = false;
+    this.plan = saved.agent_plan || null; this.events = new EventQueue(); this.events.push('startup');
+    this.epoch = 0; this.stopped = false; this.paused = false; this.started = false; this.runningTick = false;
     this.structures = new Set(this.world.data.structures);
     this.planner = config.agent ? createPlanner(config, new KnowledgeMemory(config.knowledgeRoot, config.memory)) : null;
     this.executor = new SkillExecutor(bot, event => this.skillResult(event));
     this.arbiter = new ActionArbiter(this.executor); this.log = [];
     this.lastSave = Date.now(); this.nextAgent = 0; this.controller = new AbortController();
     this.onPhysics = () => this.physics();
+    this.onHealth = () => { this.physics(); this.wake(); };
+    this.onInventory = () => this.wake();
     this.onDeath = () => { this.run.data.deaths++; this.invalidate('death'); };
     this.onRespawn = () => this.invalidate('dimension_change');
     this.onVictory = entity => {
@@ -30,6 +34,10 @@ class Runtime {
     };
   }
   start() {
+    if (this.started || this.stopped) return;
+    this.started = true;
+    this.bot.on('health', this.onHealth);
+    this.bot.inventory?.on('updateSlot', this.onInventory);
     this.bot.on('physicsTick', this.onPhysics); this.bot.on('death', this.onDeath);
     this.bot.on('respawn', this.onRespawn); this.bot.on('entityDead', this.onVictory);
     this.schedule();
@@ -49,8 +57,10 @@ class Runtime {
   invalidate(reason) {
     this.epoch++; this.controller.abort(); this.controller = new AbortController();
     this.executor.cancel(reason); this.arbiter.pending = null; this.arbiter.suspended = null;
-    if (!this.events.includes(reason)) this.events.push(reason);
-    this.save(reason);
+    // Lifecycle changes supersede pending planning requests from the old state.
+    this.events.clear();
+    this.events.push(reason, { priority: 0, source: 'lifecycle' });
+    this.save(reason); this.wake();
   }
   skillResult(event) {
     this.working.add(event); this.saveSystem.log(event.type, event);
@@ -59,9 +69,12 @@ class Runtime {
       this.world.data.locations[event.result.structure] = event.result.position;
     }
     if (event.type === 'skill_failed' && !['EAT','WATER','FLEE'].includes(event.skill)) {
-      if (!this.events.includes('goal_failed')) this.events.push('goal_failed');
-      this.lastFailure = event; this.save('goal_failed');
+      this.lastFailure = event;
+      this.epoch++; this.controller.abort(); this.controller = new AbortController();
+      this.events.push('goal_failed', { priority: 1, source: 'skill' });
+      this.save('goal_failed');
     }
+    this.wake();
   }
   save(reason) {
     try {
@@ -71,15 +84,39 @@ class Runtime {
     } catch (error) { console.error('[Save]', error.message); this.saveError = error.message; }
   }
   pause() { this.paused = true; this.epoch++; this.controller.abort(); this.arbiter.pause(); }
-  resume() { this.controller = new AbortController(); this.paused = false; this.arbiter.resume(); }
+  resume() {
+    if (!this.paused || this.stopped) return;
+    this.controller = new AbortController(); this.paused = false; this.arbiter.resume(); this.wake();
+  }
   async stop() {
     if (this.stopped) return;
     this.stopped = true; clearTimeout(this.timer); this.pause();
+    this.bot.removeListener('health', this.onHealth);
+    this.bot.inventory?.removeListener('updateSlot', this.onInventory);
     this.bot.removeListener('physicsTick', this.onPhysics); this.bot.removeListener('death', this.onDeath);
     this.bot.removeListener('respawn', this.onRespawn); this.bot.removeListener('entityDead', this.onVictory);
     this.save('shutdown');
   }
-  schedule() { if (!this.stopped) this.timer = setTimeout(() => this.tick().finally(() => this.schedule()), this.config.decisionMs); }
+  wake() {
+    if (!this.started || this.stopped || this.paused) return;
+    this.wakePending = true;
+    if (!this.runningTick) this.schedule(50);
+  }
+  schedule(delay = this.config.decisionMs) {
+    if (this.stopped) return;
+    // Keep the earliest deadline: noisy inventory events must not starve a tick.
+    const due = Date.now() + delay;
+    if (this.timer && this.timerDue <= due) return;
+    clearTimeout(this.timer); this.timerDue = due;
+    this.timer = setTimeout(async () => {
+      this.timer = null; this.wakePending = false; this.runningTick = true;
+      try { await this.tick(); }
+      finally {
+        this.runningTick = false;
+        this.schedule(this.wakePending ? 50 : this.config.decisionMs);
+      }
+    }, delay);
+  }
   async replan(reason, o, epoch, help = null) {
     if (!this.planner || (this.config.gate && Date.now() < this.nextAgent)) return false;
     const stalled = Math.min(1, (Date.now() - this.manager.lastProgress) / this.config.stagnationMs);
@@ -103,7 +140,10 @@ class Runtime {
       this.run.data.tokens += Number(usage?.totalTokens || 0);
       this.saveSystem.log('agent_output', { plan, usage }); this.save('replan'); return true;
     } catch (error) {
-      this.run.data.agentErrors++; this.saveSystem.log('agent_error', { error: error.message }); return false;
+      if (epoch === this.epoch && !this.stopped && !this.paused) {
+        this.run.data.agentErrors++; this.saveSystem.log('agent_error', { error: error.message });
+      }
+      return false;
     }
   }
   async tick() {
@@ -117,8 +157,8 @@ class Runtime {
       this.lastDimension = o.dimension;
       const progress = this.manager.evaluate(o, evidence);
       if (progress?.type) {
-        if (!this.events.includes(progress.type)) {
-          this.events.push(progress.type); this.run.data.keyDecisions++;
+        if (!this.events.has(progress.type)) {
+          this.events.push(progress.type, { priority: progress.type === 'goal_complete' ? 1 : 3 }); this.run.data.keyDecisions++;
           if (progress.type === 'goal_complete') {
             this.run.data.completedGoals.push(progress.goal);
             if (this.pendingAgentResolution) { this.run.data.agentResolved++; this.pendingAgentResolution = false; }
@@ -127,10 +167,11 @@ class Runtime {
         }
       }
       if (this.run.data.victory) { await this.stop(); return; }
-      const reason = this.events[0];
-      if (reason) {
-        const planned = await this.replan(reason, o, epoch);
-        if (planned || !this.config.agent) this.events.shift();
+      const event = this.events.peek();
+      if (event) {
+        this.saveSystem.log('decision_event', event);
+        const planned = await this.replan(event.type, o, epoch);
+        if (planned || !this.config.agent) this.events.acknowledge(event);
       }
       if (epoch !== this.epoch || this.paused || this.stopped) return;
       if (!this.executor.busy) {
