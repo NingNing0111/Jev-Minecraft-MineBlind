@@ -3,6 +3,9 @@ const fs = require('node:fs');
 // Executed inside the browser bundle. Keep this function self-contained.
 function smoothCameraRotation(viewer, Tween, yaw, pitch) {
   if (!Number.isFinite(yaw) || !Number.isFinite(pitch)) return;
+  const previous = viewer._mineblindRotationTarget;
+  if (previous && Math.abs(Math.atan2(Math.sin(yaw - previous.yaw), Math.cos(yaw - previous.yaw))) < 1e-10 && previous.pitch === pitch) return;
+  viewer._mineblindRotationTarget = { yaw, pitch };
   const camera = viewer.camera;
   if (!viewer._mineblindRotation) {
     viewer._mineblindRotation = { yaw, pitch };
@@ -20,12 +23,24 @@ function smoothCameraRotation(viewer, Tween, yaw, pitch) {
     .start();
 }
 
-const marker = '/* mineblind-camera-smoothing-v1 */';
+const marker = '/* mineblind-camera-smoothing-v2 */';
+const legacyMarker = '/* mineblind-camera-smoothing-v1 */';
 // prismarine-viewer ships a prebuilt browser bundle; editing viewer/lib alone
 // would have no effect. Guard the known bundle signature against upstream changes.
 const original = 'this.camera.rotation.set(i,e,0,"ZYX")';
 function patchBundle(source) {
   if (source.includes(marker)) return source;
+  // Upgrade already-patched installations, not just clean npm bundles.
+  if (source.includes(legacyMarker)) {
+    const start = source.indexOf(legacyMarker);
+    const suffix = ')(this,r.Tween,e,i)';
+    const end = source.indexOf(suffix, start);
+    if (source.split(legacyMarker).length !== 2 || end < 0 ||
+        !source.slice(start, end).startsWith(`${legacyMarker}(function smoothCameraRotation(`)) {
+      throw new Error('Unsupported Prismarine Viewer bundle: legacy camera signature changed');
+    }
+    return source.slice(0, start) + `${marker}(${smoothCameraRotation.toString()}${suffix}` + source.slice(end + suffix.length);
+  }
   if (source.split(original).length !== 2 || !source.includes('setFirstPersonCamera(t,e,i)')) {
     throw new Error('Unsupported Prismarine Viewer bundle: camera patch signature changed');
   }

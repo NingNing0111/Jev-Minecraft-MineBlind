@@ -73,13 +73,36 @@
     }
     .viewer-overlay {
       position: absolute;
-      bottom: 12px; left: 12px;
+      top: 12px; left: 12px;
+      height: fit-content;
       background: rgba(0,0,0,0.75);
       padding: 6px 10px;
       border-radius: 4px;
       font-size: 0.72rem;
       color: var(--muted);
     }
+
+    .equipment-hud { position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%); width: min(560px, calc(100% - 16px)); pointer-events: none; }
+    .equipment-status { font-size: 10px; color: #fff; text-shadow: 1px 1px #000; text-align: center; margin-bottom: 4px; }
+    .hotbar { display: grid; grid-template-columns: repeat(9, minmax(0, 1fr)); gap: 3px; padding: 4px; background: #111b; border: 2px solid #777; }
+    .armor-slots { display: flex; justify-content: center; gap: 4px; margin-bottom: 6px; }
+    .armor-slots .equipment-slot { width: 60px; height: 48px; }
+    .equipment-slot { position: relative; height: 58px; padding: 13px 3px 12px; background: #202830e8; border: 2px solid #60676e; color: #fff; text-align: center; min-width: 0; }
+    .equipment-slot.selected { border-color: #fff; box-shadow: inset 0 0 0 1px var(--accent), 0 0 6px #00ff8870; background: #294539ee; }
+    .slot-key { position: absolute; top: 1px; left: 3px; font-size: 9px; color: #c8d1dd; }
+    .slot-name { display: block; font-size: clamp(8px, .8vw, 10px); line-height: 1.1; overflow-wrap: anywhere; max-height: 29px; overflow: hidden; }
+    .slot-count { position: absolute; bottom: 0; right: 3px; font: bold 12px monospace; text-shadow: 1px 1px #000; }
+
+    .item-icon { width: 32px; height: 32px; object-fit: contain; image-rendering: pixelated; flex-shrink: 0; }
+    .item-icon[hidden] { display: none; }
+    .equipment-slot .item-icon { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(32px, 80%); height: 32px; }
+    .equipment-slot.has-item-icon .slot-name { visibility: hidden; }
+    .slot-key, .slot-count { z-index: 1; }
+    .inventory-item, .resource-name { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .inventory-item { padding: 5px 0; border-bottom: 1px solid #ffffff12; }
+    .inventory-name { flex: 1; overflow-wrap: anywhere; }
+    .inventory-count { font-family: monospace; white-space: nowrap; color: var(--accent); }
+    .resource-name .item-icon { width: 24px; height: 24px; }
 
     /* ── Right panel ── */
     .right-panel {
@@ -221,6 +244,13 @@
     .log-reason { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .log-hp { color: var(--danger); flex-shrink: 0; }
 
+    #decisionDialog { margin: auto; width: min(1000px, 94vw); max-height: 90vh; padding: 20px; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 10px; }
+    #decisionDialog::backdrop { background: #000a; }
+    .detail-heading { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 16px; }
+    #decisionDetail { font-size: .8rem; overflow-wrap: anywhere; }
+    #decisionDetail details { margin-top: 14px; }
+    #decisionDetail summary { cursor: pointer; padding: 8px 0; color: var(--intent-color); }
+    #decisionDetail pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #101519; padding: 12px; max-height: 45vh; overflow: auto; }
     /* Environment */
     .env-grid {
       display: grid;
@@ -336,6 +366,11 @@
 <div class="viewer-panel">
   <iframe id="viewer" title="Prismarine Viewer"></iframe>
   <div class="viewer-overlay" id="viewerAddress">🎮 Bot 第一人称视角</div>
+  <div class="equipment-hud" aria-label="玩家装备与快捷栏">
+    <div class="equipment-status" id="equipmentStatus">等待槽位数据</div>
+    <div class="armor-slots" id="armorSlots" role="list" aria-label="护甲与副手"></div>
+    <div class="hotbar" id="hotbar" role="list" aria-label="九格快捷栏"></div>
+  </div>
 </div>
 
 <!-- Right Panel -->
@@ -468,16 +503,26 @@
   <div id="paused-banner">⏸ AI 已暂停</div>
 </footer>
 
+<dialog id="decisionDialog" aria-labelledby="decisionTitle">
+  <div class="detail-heading"><h2 id="decisionTitle">决策详情</h2><button class="btn" id="closeDecision" type="button">关闭</button></div>
+  <div id="decisionDetail" aria-live="polite"></div>
+</dialog>
+<script src="/decision-details.js"></script>
 <script src="/hud-format.js"></script>
 <script src="/viewer-url.js"></script>
 <script src="/game-audio.js"></script>
+<script src="/item-icons.js"></script>
+<script src="/equipment-hud.js"></script>
 <script src="/agent-dashboard.js"></script>
 <script>
   const socket = io();
   GameAudio.attach(socket);
+  EquipmentHud.render(document, null);
   AgentDashboard.attach(document);
+  const openDecision = DecisionDetails.attach(document);
   let isPaused = false;
   let loopCount = 0;
+  let renderedLog = null;
   const INTENT_EMOJI = {
     Melee_Engage: '⚔️', Hit_and_Run: '🔄', Retreat_Sprint: '🏃',
     Strafe_Dodge: '↔️', Shield_Block: '🛡️', Pillar_Up: '🧱',
@@ -506,6 +551,7 @@
 
     const { state, decision, log, ai_paused } = data;
     AgentDashboard.render(document, data);
+    EquipmentHud.render(document, state);
     if (!state) return;
 
     // 暂停标记
@@ -601,7 +647,9 @@
     document.getElementById('timeInfo').textContent = isDaytime ? '☀️ 白天' : '🌙 夜晚';
 
     // 决策日志
-    if (Array.isArray(log)) {
+    const logSignature = Array.isArray(log) ? JSON.stringify(log) : null;
+    if (logSignature !== null && logSignature !== renderedLog) {
+      renderedLog = logSignature;
       const logEl = document.getElementById('logList');
       logEl.textContent = '';
       log.forEach(entry => {
@@ -618,6 +666,11 @@
         row.appendChild(mkSpan('log-reason', HudFormat.detail(entry)));
         if (Number.isFinite(entry.hp)) row.appendChild(mkSpan('log-hp', `❤${entry.hp}`));
         row.title = [entry.intent || entry.skill || entry.action, HudFormat.source(entry.source), HudFormat.latency(entry.latency)].join(' · ');
+        const detailsButton = document.createElement('button');
+        detailsButton.type = 'button'; detailsButton.className = 'btn';
+        detailsButton.textContent = '查看输入 / 输出';
+        detailsButton.onclick = () => openDecision(entry);
+        row.appendChild(detailsButton);
         logEl.appendChild(row);
       });
     }

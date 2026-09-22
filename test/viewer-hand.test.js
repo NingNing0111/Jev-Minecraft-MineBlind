@@ -21,6 +21,7 @@ test('first-person arm is camera-local, visible in frustum and created only once
     assert.ok(Math.abs(center.x) < 1 && Math.abs(center.y) < 1 && Math.abs(center.z) < 1);
   }
   for (const mesh of arm.children) {
+    assert.equal(mesh.material.transparent, true);
     assert.equal(mesh.material.depthTest, false);
     assert.equal(mesh.material.depthWrite, false);
     assert.equal(mesh.renderOrder, 1000);
@@ -33,6 +34,8 @@ test('hand patch composes with smoothing, is executable, idempotent and guarded'
   assert.equal(patchHandBundle(patched), patched);
   assert.equal(patchBundle(patched), patched);
   assert.throws(() => patchHandBundle('unknown'), /signature changed/);
+  const legacy = source.replace('setFirstPersonCamera(t,e,i){', 'setFirstPersonCamera(t,e,i){/* mineblind-first-person-hand-v1 */(function(){ })(this,n);');
+  assert.equal(patchHandBundle(legacy), patchHandBundle(source));
   const Viewer = vm.runInNewContext(patched, { n: THREE, r: {} });
   const v = new Viewer(); v.setFirstPersonCamera(null, 0, 0);
   assert.ok(v._mineblindHand);

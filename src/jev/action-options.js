@@ -3,6 +3,14 @@ function actionOptions(context) {
   const { goal, observation: o } = context;
   const env = o.environment || {};
   const options = {};
+  // Survival is a constrained action set, not a suggestion ores can outrank.
+  if (goal.survival) {
+    if (goal.skill === 'EXPLORE_AREA') {
+      if (env.exploration?.destination) options.EXPLORE_AREA = {
+        ...goal, position: env.exploration.destination.position };
+    } else options[goal.skill] = { ...goal };
+    return options;
+  }
   const params = { target: goal.target, amount: goal.amount, position: goal.position };
   if (goal.skill === 'EXPLORE_AREA' && env.exploration?.destination)
     options.EXPLORE_AREA = { target: goal.target || '', amount: 1, position: env.exploration.destination.position };

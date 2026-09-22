@@ -30,6 +30,7 @@ function config(env = process.env) {
     model: env.AGENT_MODEL || (provider !== 'mastra' ? 'gemini-3.8-flash-high' : 'openai/gpt-4.1'),
     decisionMs: positive('DECISION_INTERVAL_MS', 1000), stagnationMs: positive('STAGNATION_MS', 120000),
     saveMs: positive('SAVE_INTERVAL_MS', 300000), agentCooldownMs: positive('AGENT_COOLDOWN_MS', 30000),
+    unchangedPlanMs: positive('UNCHANGED_PLAN_MS', 300000),
     saveRoot: path.resolve(projectRoot, env.SAVE_DIR || 'data/saves'),
     knowledgeRoot: path.resolve(projectRoot, env.KNOWLEDGE_DIR || 'data/knowledge'),
     restore: env.RESTORE_SAVE || '', worldId: env.WORLD_ID || `${env.MC_HOST || 'localhost'}:${env.MC_PORT || 25565}` };

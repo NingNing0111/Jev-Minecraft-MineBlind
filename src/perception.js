@@ -36,7 +36,7 @@ const PASSIVE_MOBS = new Set([
 // 价值排序权重
 const VALUE_ORDER = { critical: 0, high: 1, medium: 2, low: 3 };
 
-// 缓存：每 500ms 更新一次重量级扫描（资源、装备、动物）
+// 重量级扫描缓存 3 秒（资源、装备、动物）
 const SCAN_CACHE_MS = 3000;
 const _scanCache = new WeakMap(); // per-bot
 
@@ -63,6 +63,7 @@ function extractState(bot, containerMemory = null) {
   return {
     player,
     inventory,
+    equipment_slots: require('./equipment-slots').extractEquipmentSlots(bot),
     equipment,
     dimension: String(bot.game?.dimension || 'overworld'),
     gameDay: Math.floor(Number(bot.time?.age || 0) / 24000),
@@ -122,7 +123,7 @@ function extractEnvironment(bot, inventory, containerMemory) {
   const depthBelow = raycastDistance(bot, pos, 0, -1, 0, 10);
   const blockBelow = bot.blockAt(pos.offset(0, -1, 0));
 
-  // 重量扫描用缓存（500ms TTL），避免每 50ms physics tick 都执行 78 次 findBlock
+  // 重量扫描用缓存（3s TTL）；Runtime 在调用前分片预热，physics/HUD 不执行扫描
   const cache = getScanCache(bot);
   const now = Date.now();
   const invKey = Object.keys(inventory).sort().join(',');
@@ -186,6 +187,15 @@ function bestPickaxeTier(inventory) {
 }
 
 function scanNearbyResources(bot, pos, inventory) {
+  const scan = resourceScan(bot, pos, inventory);
+  let step;
+  do { step = scan.next(); } while (!step.done);
+  return step.value;
+}
+
+// Yield between block types so resource discovery does not monopolize the
+// event loop for the entire registry. A single Mineflayer findBlock is still synchronous.
+function* resourceScan(bot, pos, inventory) {
   const resources = [];
   const containers = [];
   const crops = [];
@@ -197,6 +207,7 @@ function scanNearbyResources(bot, pos, inventory) {
     if (!blockDef) continue;
 
     const block = bot.findBlock({ matching: blockDef.id, maxDistance: meta.scan_radius });
+    yield;
     if (!block) continue;
 
     const dist = Math.round(pos.distanceTo(block.position) * 10) / 10;
@@ -477,4 +488,41 @@ function extractLightState(bot) {
   };
 }
 
-module.exports = { extractState, extractLightState, HOSTILE_MOBS };
+async function refreshResourceScan(bot, signal) {
+  const cache = getScanCache(bot);
+  const dimension = bot.game?.dimension;
+  if (signal?.aborted) return;
+  if (cache.dimension === dimension && Date.now() - cache.ts < SCAN_CACHE_MS) return;
+  const pos = bot.entity.position.clone();
+  const inventory = bot.inventory.items().reduce((acc, item) => {
+    acc[item.name] = (acc[item.name] || 0) + item.count;
+    return acc;
+  }, {});
+  const scan = resourceScan(bot, pos, inventory);
+  let step;
+  do {
+    await new Promise(resolve => setImmediate(resolve));
+    if (signal?.aborted || bot.game?.dimension !== dimension) return;
+    step = scan.next();
+  } while (!step.done);
+  Object.assign(cache, step.value, { dimension, ts: Date.now(),
+    invKey: Object.keys(inventory).sort().join(','), animals: scanNearbyAnimals(bot, pos) });
+}
+
+// HUD observations never run resource searches or recipe enumeration. Expensive
+// fields are explicitly dated and discarded across dimension/lifecycle changes.
+function extractHudState(bot, cached = null) {
+  const live = extractLightState(bot);
+  const previous = cached?.dimension === live.dimension ? cached : null;
+  return {
+    ...previous, ...live,
+    equipment_slots: require('./equipment-slots').extractEquipmentSlots(bot),
+    gameDay: Math.floor(Number(bot.time?.age || 0) / 24000),
+    environment: { ...previous?.environment, ...live.environment,
+      time_of_day: bot.time?.timeOfDay || 0, is_raining: bot.isRaining ?? false },
+    timestamp: Date.now(),
+    observation_timestamp: previous?.timestamp ?? null,
+  };
+}
+
+module.exports = { extractState, extractLightState, extractHudState, refreshResourceScan, HOSTILE_MOBS };

@@ -115,7 +115,13 @@ class Exploration {
     const p = bot.entity.position, dimension = this.dimension;
 
     // --- 卡住检测 ---
-    const stuckInfo = this.updateStuck(p, now);
+    // Standing still to mine/craft/wait is not failed exploration movement.
+    const moving = typeof bot.pathfinder?.isMoving !== 'function' || bot.pathfinder.isMoving();
+    if (!moving) {
+      this.lastStuckPos = point(p); this.lastStuckCheck = now;
+      this.stuckCount = 0; this.stuckSince = null;
+    }
+    const stuckInfo = moving ? this.updateStuck(p, now) : { stuck: false, stuckMs: null };
     if (stuckInfo.stuck) {
       this.forceEscape(p, now);
     }
@@ -137,7 +143,7 @@ class Exploration {
 
     // --- 读取感知层的周围资源（来自 perception.js 注入，通过 bot._perceptionResources 共享）---
     // 如果 runtime 将 nearby_resources 注入到 bot 临时属性，可直接利用；否则降级为空
-    const perceptionResources = bot._perceptionResources || [];
+    const perceptionResources = target === 'food' ? [] : bot._perceptionResources || [];
 
     const candidates = [];
     const add = (position, reason, bonus = 0) => {
@@ -188,7 +194,7 @@ class Exploration {
     }
 
     // 卡住时扩大搜索半径到 48，否则正常 12/24
-    const radii = stuckInfo.stuck ? [36, 48] : [12, 24];
+    const radii = target === 'food' ? [4, 8, 12, 24] : stuckInfo.stuck ? [36, 48] : [12, 24];
     for (const radius of radii) for (let i = 0; i < 16; i++) {
       const angle = i * Math.PI / 8;
       const stand = this.surface(bot, p.x + Math.cos(angle) * radius, p.y, p.z + Math.sin(angle) * radius);

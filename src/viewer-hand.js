@@ -5,7 +5,9 @@ const fs = require('node:fs');
 function ensureFirstPersonHand(viewer, THREE) {
   if (viewer._mineblindHand) return;
   const arm = new THREE.Group();
-  const material = color => new THREE.MeshBasicMaterial({ color, depthTest: false, depthWrite: false });
+  // World chunks are transparent materials. Join that render queue so the
+  // view model's renderOrder actually draws it AFTER terrain (including water).
+  const material = color => new THREE.MeshBasicMaterial({ color, depthTest: false, depthWrite: false, transparent: true });
   const hand = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.42, 0.18), material(0xb98262));
   const sleeve = new THREE.Mesh(new THREE.BoxGeometry(0.19, 0.24, 0.19), material(0x20a6ae));
   sleeve.position.y = -0.28;
@@ -23,9 +25,17 @@ function ensureFirstPersonHand(viewer, THREE) {
   viewer._mineblindHand = arm;
 }
 
-const marker = '/* mineblind-first-person-hand-v1 */';
+const marker = '/* mineblind-first-person-hand-v2 */';
+const legacyMarker = '/* mineblind-first-person-hand-v1 */';
 function patchHandBundle(source) {
   if (source.includes(marker)) return source;
+  // Upgrade the already-installed v1 injection without duplicating the arm.
+  if (source.includes(legacyMarker)) {
+    const start = source.indexOf(legacyMarker);
+    const end = source.indexOf('})(this,n);', start);
+    if (end < 0) throw new Error('Unsupported Prismarine Viewer bundle: legacy hand patch changed');
+    source = source.slice(0, start) + source.slice(end + '})(this,n);'.length);
+  }
   const signature = 'setFirstPersonCamera(t,e,i){';
   if (source.split(signature).length !== 2 || !source.includes('this.camera=new n.PerspectiveCamera')) {
     throw new Error('Unsupported Prismarine Viewer bundle: hand patch signature changed');

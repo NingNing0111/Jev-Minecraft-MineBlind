@@ -59,7 +59,10 @@ test('render shows rationale, constraints, metrics, inventory and clears stale p
   assert.equal(row.className, 'goal-item current');
   assert.equal(row.children[1].textContent, goal.description);
   assert.equal(row.children[3].children[0].textContent, '避开敌人');
-  assert.equal(doc.getElementById('inventoryList').textContent, 'oak_log × 3');
+  const inventoryRow = doc.getElementById('inventoryList').children[0];
+  assert.equal(inventoryRow.children[0].src, '/assets/items/oak_log.svg');
+  assert.equal(inventoryRow.children[1].textContent, 'oak log');
+  assert.equal(inventoryRow.children[2].textContent, '× 3');
   assert.equal(doc.getElementById('saveError').hidden, false);
   render(doc, data); assert.equal(doc.getElementById('goalList').children[0], row);
   render(doc, {});

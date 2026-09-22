@@ -8,7 +8,8 @@ const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer, { cors: { origin: '*' } });
 
-app.use(express.static(path.join('/root/code/MineBlind', 'public')));
+require('./src/item-assets').installItemAssets(app);
+app.use(express.static(path.join(__dirname, 'public')));
 
 io.on('connection', (socket) => {
   console.log(`[Server] 前端连接: ${socket.id}`);

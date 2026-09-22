@@ -25,9 +25,8 @@ test('event queue coalesces storms, prioritizes lifecycle and preserves newer re
   assert.equal(q.items.size, 3); assert.equal(q.peek().type, 'death');
   const death = q.peek(); q.acknowledge(death); assert.equal(q.has('death'), false);
 });
-test('death, pause and skill failure discard in-flight planner results', async t => {
-  for (const change of [r => r.invalidate('death'), r => r.pause(),
-    r => r.skillResult({ type: 'skill_failed', skill: 'MINE_BLOCK', result: {} })]) {
+test('death and pause discard in-flight planner results', async t => {
+  for (const change of [r => r.invalidate('death'), r => r.pause()]) {
     const r = runtime(t); let resolve;
     r.planner = { plan: () => new Promise(done => { resolve = done; }) };
     const pending = r.replan('startup', {}, r.epoch);
@@ -55,6 +54,7 @@ test('ungated mode throttles failures and same-tick help with bounded backoff', 
   assert.equal(r.agentError, 'provider unavailable');
   assert.ok(r.nextAgent > Date.now());
   r.nextAgent = 0;
+  r.agentCircuit.retryAt = 0; // Advance both independent retry gates for the second attempt.
   const before = Date.now();
   await r.replan('startup', {}, r.epoch);
   assert.equal(calls, 2);

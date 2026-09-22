@@ -1,3 +1,6 @@
+const { planningKey, failureClass } = require('./planning-policy');
+const { CircuitBreaker } = require('../jev/circuit-breaker');
+const { DecisionHistory, snapshot } = require('../decision-history');
 const { SQLiteMemory } = require('../memory/sqlite');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
@@ -12,7 +15,7 @@ const { createPlanner } = require('../agent/planner');
 const { SkillExecutor } = require('../skills/executor');
 const { ActionGuard } = require('../skills/action-guard');
 const { ActionArbiter, reflex } = require('./arbiter');
-const { extractState, extractLightState } = require('../perception');
+const { extractState, extractLightState, extractHudState, refreshResourceScan } = require('../perception');
 const { EventQueue } = require('./events');
 const { Exploration } = require('../exploration');
 class Runtime {
@@ -30,7 +33,10 @@ class Runtime {
     this.containerMemory = new ContainerMemory(this.world.data.container_memory || {});
     this.executor = new SkillExecutor(bot, event => this.skillResult(event), this.exploration, this.containerMemory);
     this.actionGuard = new ActionGuard(bot); this.executor.guard = this.actionGuard;
+    this.decisionHistory = new DecisionHistory(); bot.decisionHistory = this.decisionHistory;
     this.arbiter = new ActionArbiter(this.executor); this.log = [];
+    this.planningAttempts = new Map(); this.localFailures = 0;
+    this.agentCircuit = new CircuitBreaker(); this.selectorCircuit = new CircuitBreaker();
     this.lastSave = Date.now(); this.nextAgent = 0; this.controller = new AbortController();
     this.memory = new SQLiteMemory(path.resolve(config.saveRoot, 'memory', `${randomUUID()}.sqlite`),
       this.saveSystem.identity, this.saveSystem.restoredDatabase);
@@ -70,7 +76,39 @@ class Runtime {
     this.bot.inventory?.on('updateSlot', this.onInventory);
     this.bot.on('physicsTick', this.onPhysics); this.bot.on('death', this.onDeath);
     this.bot.on('respawn', this.onRespawn); this.bot.on('entityDead', this.onVictory);
+    this.scheduleState();
     this.schedule();
+  }
+  // Separate from the awaited decision/persistence loop; remains live while paused.
+  scheduleState() {
+    if (this.stopped) return;
+    try { this.publishState(); }
+    catch (error) { this.saveSystem.log('state_error', { error: error.message }); }
+    finally {
+      if (!this.stopped) this.stateTimer = setTimeout(() => this.scheduleState(), 200);
+    }
+  }
+  publishState() {
+    if (this.stopped || !this.bot.entity) return;
+    const o = extractHudState(this.bot, this.latestObservation);
+    o.structures = [...this.structures]; o.dragonDefeated = this.run.data.victory;
+    const activeSkill = this.executor.current?.skill || 'Idle';
+    const latestDecision = this.log[0];
+    const matched = latestDecision?.skill === activeSkill;
+    this.broadcast('state_update', { state: o, decision: { intent: activeSkill,
+      reason: this.blockedAction?.reason || (require('../survival').needsFood(o) ? '生存优先：获取食物并恢复饱食度，暂停无关采矿' : this.manager.current()?.description) || '自主探索',
+      source: matched ? latestDecision.source : 'runtime',
+      latency: latestDecision?.latency ?? null,
+      latencyScope: matched ? 'current' : 'latest' },
+      log: this.log.slice(0, 10), ai_paused: this.paused,
+      experiment: { mode: this.config.mode, agentEnabled: this.config.agent,
+        plan: this.plan, goalManager: this.manager.snapshot(),
+        providerCircuits: { agent: this.agentCircuit.snapshot(), selector: this.selectorCircuit.snapshot() },
+        agentError: this.agentError || null, nextAgentAt: this.nextAgent,
+        blockedAction: this.blockedAction || null, actionFailures: this.actionGuard.context(),
+        goal: this.manager.current(), metrics: this.run.metrics(),
+        evidence: o.observation_timestamp === null ? null : this.latestEvidence,
+        saveError: this.saveError } });
   }
   observe() {
     const o = extractState(this.bot, this.containerMemory);
@@ -86,9 +124,11 @@ class Runtime {
     } catch (error) { this.saveSystem.log('reflex_error', { error: error.message }); }
   }
   invalidate(reason) {
+    this.latestObservation = null; this.latestEvidence = null;
     this.epoch++; this.controller.abort(); this.controller = new AbortController();
     this.executor.cancel(reason); this.arbiter.pending = null; this.arbiter.suspended = null;
     this.exploration.reset();
+    this.planningAttempts.clear(); this.localFailures = 0;
     // Lifecycle changes supersede pending planning requests from the old state.
     this.events.clear();
     this.events.push(reason, { priority: 0, source: 'lifecycle' });
@@ -100,12 +140,17 @@ class Runtime {
       this.structures.add(event.result.structure); this.world.data.structures = [...this.structures];
       this.world.data.locations[event.result.structure] = event.result.position;
     }
-    if (event.type === 'skill_complete') this.actionGuard.success(event.skill, event.params);
+    if (event.type === 'skill_complete') {
+      this.actionGuard.success(event.skill, event.params); this.localFailures = 0;
+    }
     if (event.type === 'skill_failed' && !['EAT','WATER','FLEE'].includes(event.skill)) {
       const failure = this.actionGuard.fail(event.skill, event.params, event);
-      this.lastFailure = { ...event, retryAt: failure.retryAt };
-      this.epoch++; this.controller.abort(); this.controller = new AbortController();
-      this.events.push('goal_failed', { priority: 1, source: 'skill' });
+      const category = failureClass(event.code);
+      this.lastFailure = { ...event, category, retryAt: failure.retryAt };
+      // Local navigation/pickup failures get bounded recovery before strategic help.
+      // Do not abort a planner/selector just because local execution failed.
+      if (category !== 'local_execution' || ++this.localFailures >= 3)
+        this.events.push('goal_failed', { priority: 1, source: category });
       // Checkpoint the first failure promptly, but coalesce subsequent failures.
       if (!this.lastFailureSave || Date.now() - this.lastFailureSave >= 30000) {
         this.lastFailureSave = Date.now(); this.save('goal_failed');
@@ -140,7 +185,7 @@ class Runtime {
   }
   async stop() {
     if (this.stopped) return;
-    this.stopped = true; clearTimeout(this.timer); this.pause();
+    this.stopped = true; clearTimeout(this.timer); clearTimeout(this.stateTimer); this.pause();
     this.bot.removeListener('health', this.onHealth);
     this.bot.inventory?.removeListener('updateSlot', this.onInventory);
     this.bot.removeListener('physicsTick', this.onPhysics); this.bot.removeListener('death', this.onDeath);
@@ -169,7 +214,10 @@ class Runtime {
     }, delay);
   }
   async replan(reason, o, epoch, help = null) {
-    if (!this.planner || Date.now() < this.nextAgent) return false;
+    if (!this.planner || Date.now() < this.nextAgent || !this.agentCircuit.allowed()) return false;
+    const key = planningKey(o, this.manager.current());
+    const repeated = this.planningAttempts.get(key);
+    if (repeated && Date.now() - repeated < (this.config.unchangedPlanMs || 300000)) return false;
     const stalled = Math.min(1, (Date.now() - this.manager.lastProgress) / this.config.stagnationMs);
     const scores = { stagnation: reason === 'stagnation' ? 1 : stalled, uncertainty: help ? 1 : .6,
       invalid: ['startup','goal_complete','goal_failed','death','dimension_change'].includes(reason) || help ? 1 : .7, value: 1 };
@@ -186,19 +234,25 @@ class Runtime {
     this.saveSystem.log('agent_input', { context });
     try {
       const { plan, usage } = await this.planner.plan(context, AbortSignal.any([this.controller.signal, AbortSignal.timeout(60000)]));
+      this.run.data.tokens += Number(usage?.totalTokens || 0);
+      this.agentCircuit.success();
       if (epoch !== this.epoch || this.stopped || this.paused) return false;
+      this.planningAttempts.set(key, Date.now());
+      if (this.planningAttempts.size > 128) this.planningAttempts.delete(this.planningAttempts.keys().next().value);
       this.executor.cancel('replan'); this.arbiter.pending = null; this.arbiter.suspended = null;
       this.plan = plan; this.manager.setPlan(plan); this.pendingAgentResolution = true;
+      this.planningAttempts.set(planningKey(o, this.manager.current()), Date.now());
+      if (this.planningAttempts.size > 128) this.planningAttempts.delete(this.planningAttempts.keys().next().value);
       this.agentFailures = 0; this.agentError = null;
       this.nextAgent = Date.now() + this.config.agentCooldownMs;
-      this.run.data.tokens += Number(usage?.totalTokens || 0);
       this.saveSystem.log('agent_output', { plan, usage }); this.save('replan'); return true;
     } catch (error) {
       if (epoch === this.epoch && !this.stopped && !this.paused) {
         this.agentFailures = (this.agentFailures || 0) + 1;
         this.nextAgent = Date.now() + Math.min(300000, this.config.agentCooldownMs * 2 ** Math.min(this.agentFailures - 1, 4));
+        const provider = this.agentCircuit.fail(error);
         this.agentError = error.message;
-        this.run.data.agentErrors++; this.saveSystem.log('agent_error', { error: error.message, retryAt: this.nextAgent });
+        this.run.data.agentErrors++; this.saveSystem.log('agent_error', { error: error.message, provider, retryAt: this.nextAgent });
       }
       return false;
     }
@@ -210,9 +264,13 @@ class Runtime {
       await this.memoryReady;
       await this.containerMemory.refresh(this.memory, this.bot.entity.position, String(this.bot.game?.dimension || 'overworld'));
       if (epoch !== this.epoch || this.stopped || this.paused) return;
-      const o = this.observe(); this.run.update(o); const evidence = await this.world.updatePersistent(o, this.memory);
+      await refreshResourceScan(this.bot, this.controller.signal);
+      if (epoch !== this.epoch || this.stopped || this.paused) return;
+      const o = this.observe(); this.latestObservation = o;
+      this.run.update(o); const evidence = await this.world.updatePersistent(o, this.memory);
       await this.saveSystem.flushEvents();
       if (epoch !== this.epoch || this.stopped || this.paused) return;
+      this.latestEvidence = evidence;
       // 将感知层的周围资源共享给 exploration，引导探索方向
       this.bot._perceptionResources = o.environment.nearby_resources || [];
       // Expensive terrain scans are cached and never run in the physics/reflex loop.
@@ -256,17 +314,36 @@ class Runtime {
         // A has no planner: the same skill selector sees the terminal objective, not a hidden strategy agent.
         if (!this.config.agent) tactical.objective = 'Defeat the Ender Dragon autonomously';
         const feasibility = this.actionGuard.check(tactical.skill, tactical);
+        const available = actionOptions({ observation: o, goal: tactical, workingMemory: this.working.snapshot() });
+        if (feasibility.ok && !Object.keys(available).length) {
+          feasibility.ok = false; feasibility.code = 'NO_ACTION_OPTIONS';
+          feasibility.reason = tactical.survival
+            ? '求生受阻：缺少可执行食物来源或安全出口；低饱食度无法靠待命回血，需安全脱困或外部干预'
+            : '没有可执行动作或安全探索出口；等待环境变化或重新规划';
+        }
         this.blockedAction = feasibility.ok ? null : { skill: tactical.skill, reason: feasibility.reason, retryAt: feasibility.retryAt };
-        if (!feasibility.ok && !feasibility.cached) {
+        const recovery = !feasibility.ok
+          ? require('../skills/recovery-action').recoveryAction(this.bot, this.actionGuard, o, this.recoveryAttempts || 0) : null;
+        if (recovery) {
+          this.blockedAction = null;
+          if (recovery.params.localRecovery && !o.environment.exploration.destination)
+            this.recoveryAttempts = (this.recoveryAttempts || 0) + 1;
+        }
+        if (!feasibility.ok && !feasibility.cached && !recovery) {
           this.skillResult({ type: 'skill_failed', skill: tactical.skill, params: tactical, code: feasibility.code, error: feasibility.reason });
           return;
         }
         // Do not repeatedly call the selector/model for an unchanged impossible action.
-        const decision = feasibility.ok
-          ? await decide({ observation: o, goal: tactical, workingMemory: this.working.snapshot(), worldModel: this.world.decisionContext() }, this.controller.signal)
-          : null;
+        const trace = {};
+        const decisionInput = snapshot({ observation: o, goal: tactical, workingMemory: this.working.snapshot(), worldModel: this.world.decisionContext() });
+        const decision = recovery || (feasibility.ok
+          ? await decide(decisionInput, this.controller.signal, trace, this.selectorCircuit)
+          : null);
         if (epoch !== this.epoch || this.paused || this.stopped) return;
         if (decision?.action === 'REQUEST_AGENT') {
+          // A selector's refusal is also a failed tactical attempt: do not ask
+          // the same question every tick while the strategic cooldown is active.
+          this.actionGuard.fail(tactical.skill, tactical, { code: decision.reason, reason: '技能选择器请求重新规划，等待重试' });
           this.run.data.keyDecisions++;
           const planned = await this.replan(decision.reason, o, epoch, decision);
           if (!planned && epoch === this.epoch && !this.paused && !this.stopped) {
@@ -275,23 +352,14 @@ class Runtime {
             if (skill) this.arbiter.submit(skill, options[skill], 3);
           }
         } else if (decision) this.arbiter.submit(decision.skill, decision.params, decision.skill === 'FIGHT_MOB' ? 2 : 3);
-        if (decision) { this.working.add(decision); this.log.unshift({ timestamp: Date.now(), hp: o.player.hp, intent: decision.skill || decision.action, ...decision });
+        if (decision) { this.working.add(decision);
+          const timestamp = Date.now();
+          const id = this.decisionHistory.add({ timestamp, kind: 'tactical', input: decisionInput,
+            request: trace.request || null, response: trace.response || null, error: trace.error || null,
+            output: decision, note: '输出为技能选择结果，不代表技能执行成功；本地降级没有模型响应。' });
+          this.log.unshift({ id, timestamp, hp: o.player.hp, intent: decision.skill || decision.action, ...decision });
         this.log = this.log.slice(0, 50); }
       }
-      const activeSkill = this.executor.current?.skill || 'Idle';
-      const latestDecision = this.log[0];
-      const matched = latestDecision?.skill === activeSkill;
-      this.broadcast('state_update', { state: o, decision: { intent: activeSkill,
-        reason: this.blockedAction?.reason || this.manager.current()?.description || '自主探索',
-        source: matched ? latestDecision.source : 'runtime',
-        latency: latestDecision?.latency ?? null,
-        latencyScope: matched ? 'current' : 'latest' },
-        log: this.log.slice(0, 10), ai_paused: this.paused,
-        experiment: { mode: this.config.mode, agentEnabled: this.config.agent,
-          plan: this.plan, goalManager: this.manager.snapshot(),
-          agentError: this.agentError || null, nextAgentAt: this.nextAgent,
-          blockedAction: this.blockedAction || null, actionFailures: this.actionGuard.context(),
-          goal: this.manager.current(), metrics: this.run.metrics(), evidence, saveError: this.saveError } });
       if (Date.now() - this.lastSave >= this.config.saveMs) this.save('periodic');
     } catch (error) { if (!this.controller.signal.aborted) this.saveSystem.log('runtime_error', { error: error.message }); }
   }

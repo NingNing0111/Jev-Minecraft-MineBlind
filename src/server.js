@@ -28,12 +28,21 @@ function startServer(bot) {
   require('./sound-assets').createSoundAssets().routes(app);
   detachGameAudio = require('./game-audio').attachGameAudio(bot, io);
 
+  require('./item-assets').installItemAssets(app);
+
   // 静态文件服务
   app.use(express.static(path.join(__dirname, '..', 'public')));
 
   // API: 获取当前状态（REST 备用）
   app.get('/api/status', (_req, res) => {
     res.json(latestBroadcast || {});
+  });
+
+  app.get('/api/decisions/:id', (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const record = bot.decisionHistory?.get(req.params.id);
+    if (!record) return res.status(404).json({ error: '记录已过期或来自旧会话；仅保留最近 50 条详情。' });
+    res.json(record);
   });
 
   // Socket.io 连接
@@ -67,6 +76,8 @@ function startServer(bot) {
   try {
     require('./viewer-smoothing').installViewerSmoothing();
     require('./viewer-hand').installViewerHand();
+    require('./viewer-entities').installViewerEntities();
+    require('./viewer-performance').installViewerPerformance();
     const { mineflayer: mineflayerViewer } = require('prismarine-viewer');
     mineflayerViewer(bot, { port: VIEWER_PORT, firstPerson: true });
     console.log(`[Server] 3D 视角 Prismarine-Viewer: http://localhost:${VIEWER_PORT}`);

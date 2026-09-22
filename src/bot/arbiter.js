@@ -32,7 +32,8 @@ function reflex(bot, observation) {
   if (threat) return { skill: 'FLEE', params: { position: threat.position }, priority: 0 };
   if ((observation.player.is_on_fire || (observation.player.velocity.y < -0.8 && observation.environment.depth_below <= 4)) && observation.inventory.water_bucket && !observation.dimension.includes('nether')) return { skill: 'WATER', params: {}, priority: 1 };
   if ((observation.player.hunger < 14 || observation.player.hp < 8) && !observation.threat_scan.some(t => t.distance < 6)
-      && bot.inventory.items().some(i => bot.registry.foodsByName?.[i.name])) return { skill: 'EAT', params: {}, priority: 1 };
+      && observation.player.hunger < 20
+      && bot.inventory.items().some(i => require('../survival').safeFood(i.name))) return { skill: 'EAT', params: {}, priority: 1 };
   return null;
 }
 module.exports = { ActionArbiter, reflex };

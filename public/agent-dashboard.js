@@ -1,5 +1,6 @@
 (function (root) {
   'use strict';
+  const icons = typeof module !== 'undefined' && module.exports ? require('./item-icons') : root.ItemIcons;
   const objectives = { SURVIVE: '生存', ACQUIRE: '收集资源', ENTER_DIMENSION: '进入维度', FIND_STRUCTURE: '寻找建筑', DEFEAT_DRAGON: '击败末影龙' };
   const number = value => Number.isFinite(value) ? value.toLocaleString('zh-CN', { maximumFractionDigits: 1 }) : '—';
   const duration = value => Number.isFinite(value) ? `${Math.floor(value / 60000)} 分 ${Math.floor(value / 1000) % 60} 秒` : '—';
@@ -109,7 +110,11 @@
       resources.forEach(resource => {
         const row = element('li', 'goal-item');
         const heading = element('div', 'goal-heading');
-        heading.append(element('span', '', resource.display || resource.type || '未知资源'),
+        const resourceName = element('span', 'resource-name');
+        const icon = icons.create(doc, resource.type);
+        if (icon) resourceName.append(icon);
+        resourceName.append(element('span', '', resource.display || resource.type || '未知资源'));
+        heading.append(resourceName,
           element('span', '', Number.isFinite(resource.distance) ? `${number(resource.distance)} 格` : '距离未知'));
         const harvest = resource.can_harvest === true ? '✓ 可采集' : resource.can_harvest === false ? '⚠ 工具不足' : '采集条件未知';
         const position = resource.position;
@@ -125,7 +130,18 @@
       });
     }
     const inventory = Object.entries(data.state?.inventory || {}).filter(([, count]) => count > 0);
-    text('inventoryList', inventory.length ? inventory.map(([name, count]) => `${name} × ${count}`).join('\n') : '暂无背包资源');
+    const inventoryList = doc.getElementById('inventoryList');
+    inventoryList.replaceChildren();
+    if (!inventory.length) inventoryList.textContent = '暂无背包资源';
+    inventory.forEach(([name, count]) => {
+      const row = element('div', 'inventory-item');
+      row.title = name;
+      const icon = icons.create(doc, name);
+      if (icon) row.append(icon);
+      row.append(element('span', 'inventory-name', name.replaceAll('_', ' ')),
+        element('span', 'inventory-count', `× ${count}`));
+      inventoryList.append(row);
+    });
   }
 
   const api = { model, attach, render };

@@ -1,0 +1,24 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const { patchEntityBundle } = require('../src/viewer-entities');
+const { patchHandBundle } = require('../src/viewer-hand');
+const { patchBundle } = require('../src/viewer-smoothing');
+test('entity support guard preserves fallback, errors and other viewer patches', () => {
+  const source = fs.readFileSync(require.resolve('prismarine-viewer/public/index.js'), 'utf8');
+  const patched = patchEntityBundle(patchHandBundle(patchBundle(source)));
+  new vm.Script(patched);
+  assert.equal(patchEntityBundle(patched), patched);
+  assert.match(patched, /if\(t.name&&a.supports\(t.name\)\)try/);
+  assert.ok(patched.includes('catch(t){console.log(t)}const i=new n.BoxGeometry(t.width,t.height,t.width)'));
+  assert.throws(() => patchEntityBundle('unknown'), /signature changed/);
+  const start = patched.indexOf('static supports(name)');
+  const end = patched.indexOf('constructor(t,e,i)', start);
+  const supports = vm.runInNewContext('(class {' + patched.slice(start, end) + '}).supports', { n: require('../node_modules/prismarine-viewer/viewer/lib/entity/entities.json') });
+  const oldStart = patched.indexOf('/* mineblind-entity-support-v2 */');
+  const old = patched.slice(0, oldStart) + '/* mineblind-entity-support-v1 */static supports(name){return Object.prototype.hasOwnProperty.call(n,name)}' + patched.slice(end);
+  assert.equal(patchEntityBundle(old), patched);
+  assert.equal(supports('squid'), true);
+  for (const name of ['item', 'glow_squid', 'toString', 'witch', 'piglin', 'piglin_brute', 'pillager', 'vex', 'zombified_piglin']) assert.equal(supports(name), false);
+});

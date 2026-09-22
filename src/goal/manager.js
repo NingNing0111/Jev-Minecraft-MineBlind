@@ -21,6 +21,8 @@ class GoalManager {
   current() { return this.goals[this.index] || null; }
   tactical(o, bot) {
     const g = this.current();
+    const survival = require('../survival').survivalGoal(o);
+    if (survival) return { goalId: g?.id, ...survival };
     if (!g) return { skill: 'EXPLORE_AREA', target: '', amount: 1 };
     const skills = { SURVIVE: 'EXPLORE_AREA', ACQUIRE: 'MINE_RESOURCE', ENTER_DIMENSION: 'BUILD_PORTAL',
       FIND_STRUCTURE: 'SEARCH_STRUCTURE', DEFEAT_DRAGON: 'FIGHT_MOB' };
@@ -36,6 +38,18 @@ class GoalManager {
     if (!item) return explore;
     const table = bot.findBlock({ matching: bot.registry.blocksByName.crafting_table?.id, maxDistance: 16 });
     if (bot.recipesFor(item.id, null, 1, table).length) return { skill: 'CRAFT_ITEM', target, amount };
+    // Prefer observable acquisition over reversible packing/unpacking recipes.
+    // Otherwise raw_iron -> raw_iron_block -> raw_iron becomes a dead-end.
+    const drops = { cobblestone: 'stone', raw_iron: 'iron_ore', raw_gold: 'gold_ore', raw_copper: 'copper_ore', diamond: 'diamond_ore', coal: 'coal_ore' };
+    const block = drops[target] || target;
+    const candidates = drops[target] ? [block, `deepslate_${block}`] : [block];
+    for (const name of candidates) {
+      const id = bot.registry.blocksByName[name]?.id;
+      if (id !== undefined && bot.findBlock({ matching: id, maxDistance: 48 }))
+        return { skill: 'MINE_RESOURCE', target: name, amount };
+    }
+    // Raw drops should be searched for, not manufactured from their storage block.
+    if (drops[target]) return explore;
     // Recipe deltas supply local prerequisites; the strategic agent never emits these steps.
     const recipes = bot.recipesAll(item.id, null, true);
     const hasIngredients = recipe => recipe.delta.filter(d => d.count < 0).every(d =>
@@ -53,10 +67,6 @@ class GoalManager {
         if (name && !seen.has(name)) return this.acquire(name, -ingredient.count, inventory, bot, seen);
       }
     }
-    const drops = { cobblestone: 'stone', raw_iron: 'iron_ore', raw_gold: 'gold_ore', diamond: 'diamond_ore', coal: 'coal_ore' };
-    const block = drops[target] || target;
-    const id = bot.registry.blocksByName[block]?.id;
-    if (id !== undefined && bot.findBlock({ matching: id, maxDistance: 48 })) return { skill: 'MINE_RESOURCE', target: block, amount };
     const mobs = { blaze_rod: 'blaze', ender_pearl: 'enderman' };
     if (mobs[target]) return { skill: 'FIGHT_MOB', target: mobs[target], amount };
     return explore;

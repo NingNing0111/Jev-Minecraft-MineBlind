@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const axios = require('axios');
+const { CircuitBreaker } = require('../src/jev/circuit-breaker');
 const { decide } = require('../src/jev/client');
 const context = { goal: { skill: 'EXPLORE_AREA' }, observation: { environment: {
   exploration: { destination: { position: { x: 1, y: 64, z: 1 } } }
@@ -19,12 +20,12 @@ test('all decision paths supply measured latency, including fallback and help', 
   process.env.JEV_API_KEY = 'offline';
   for (const skill of ['EXPLORE_AREA', 'REQUEST_AGENT', 'INVALID', 'BUILD_PORTAL']) {
     axios.post = async () => ({ data: { answers: { skill: { choice: skill } } } });
-    timed(await decide(context));
+    timed(await decide(context, undefined, {}, new CircuitBreaker()));
   }
   axios.post = async () => { await new Promise(resolve => setTimeout(resolve, 20)); throw new Error('offline timeout'); };
   const failed = await decide(context);
   assert.equal(failed.source, 'local');
   assert.ok(failed.latency >= 10);
   const controller = new AbortController(); controller.abort();
-  await assert.rejects(decide(context, controller.signal), /offline timeout/);
+  await assert.rejects(decide(context, controller.signal), { name: 'AbortError' });
 });

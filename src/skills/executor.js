@@ -51,8 +51,40 @@ class SkillExecutor {
     return this.move(t, new goals.GoalNear(position.x, position.y, position.z, radius));
   }
   async move(t, goal) {
+    this.check(t);
+    const pf = this.bot.pathfinder;
+    // A partial result means "continue this search", not "unreachable".
+    // Bound both wall time and slices, yielding so physics/reflexes can still run.
+    if (pf.getPathFromTo && pf.movements) {
+      const budgetMs = 1000, maxSlices = 20;
+      const deadline = performance.now() + budgetMs;
+      const search = pf.getPathFromTo(pf.movements, this.bot.entity.position, goal,
+        { timeout: budgetMs, tickTimeout: 50, searchRadius: 32 });
+      let result;
+      try {
+        for (let slice = 0; slice < maxSlices && performance.now() < deadline; slice++) {
+          this.check(t);
+          const next = search.next();
+          result = next.value?.result;
+          this.check(t);
+          if (next.done || result?.status !== 'partial') break;
+          await new Promise(resolve => setImmediate(resolve));
+        }
+      } finally { search.return?.(); }
+      this.check(t);
+      if (result?.status !== 'success') throw new SkillError(
+        result?.status === 'noPath' ? 'No path to target in local search area'
+          : 'No proven path within local search budget',
+        result?.status === 'noPath' ? 'NO_PATH' : 'PATH_BUDGET');
+    }
     let last = this.bot.entity.position.clone();
-    let timer;
+    let timer, deadline;
+    const bounded = new Promise((_, reject) => {
+      deadline = setTimeout(() => {
+        reject(new SkillError('Navigation exceeded 12 second budget', 'STUCK'));
+        this.bot.pathfinder.setGoal(null);
+      }, 12000);
+    });
     const stalled = new Promise((_, reject) => {
       timer = setInterval(() => {
         const current = this.bot.entity.position;
@@ -63,14 +95,24 @@ class SkillExecutor {
         last = current.clone();
       }, 8000);
     });
-    try { return await this.step(t, () => Promise.race([this.bot.pathfinder.goto(goal), stalled])); }
-    finally { clearInterval(timer); }
+    try { return await this.step(t, () => Promise.race([this.bot.pathfinder.goto(goal), stalled, bounded])); }
+    catch (error) {
+      if (!error.code && /no path/i.test(error.message)) error.code = 'NO_PATH';
+      throw error;
+    }
+    finally { clearInterval(timer); clearTimeout(deadline); }
   }
   async explore(t) {
     // Revalidate against live local observations, including resumed actions after a reflex.
     const info = this.exploration.observe(this.bot, t.params.target || '');
     const destination = info.destination;
-    if (!destination) throw new SkillError('No safe loaded frontier; reassess the goal or terrain', 'GOAL_UNACTIONABLE');
+    if (!destination) {
+      if (t.params.localRecovery) {
+        const result = await require('./local-recovery').localRecovery(this, t);
+        if (result) return result;
+      }
+      throw new SkillError('No safe loaded frontier or conservative recovery passage', 'GOAL_UNACTIONABLE');
+    }
     t.explorationPosition = destination.position;
     try {
       await this.navigate(t, destination.position, 3);
@@ -136,6 +178,10 @@ class SkillExecutor {
             if (d < closestDist) { closestDist = d; chest = found; }
           }
         }
+        if (p.position) {
+          const bound = b.blockAt(new Vec3(p.position.x, p.position.y, p.position.z));
+          chest = bound && containerIds.includes(bound.type) ? bound : null;
+        }
         if (!chest) throw new SkillError('No visible chest or barrel');
         await this.navigate(t, chest.position);
         this.check(t);
@@ -197,7 +243,8 @@ class SkillExecutor {
         return this.navigate(t, portal.position, 0);
       }
       case 'EAT': {
-        const food = b.inventory.items().find(i => b.registry.foodsByName?.[i.name]);
+        const food = b.inventory.items().find(i => require('../survival').safeFood(i.name)
+          && (!p.target || p.target === 'food' || i.name === p.target));
         if (!food) throw new SkillError('No edible food');
         await this.step(t, () => b.equip(food, 'hand'));
         return this.step(t, () => b.consume());
