@@ -69,7 +69,8 @@ test('arbiter preserves highest pending reflex until old writer settles', () => 
 });
 test('cancelled container opening always closes without withdrawal', async () => {
   let resolve; let closed=false; let withdrew=false;
-  const bot = { entity:{position:{}}, registry:{blocksByName:{chest:{id:1}}}, inventory:{items:()=>[]},
+  const { Vec3 } = require('vec3');
+  const bot = { entity:{position:new Vec3(0,0,0)}, registry:{blocksByName:{chest:{id:1}}}, inventory:{items:()=>[]},
     findBlock:()=>({position:{x:0,y:0,z:0}}), pathfinder:{goto:async()=>{},setGoal(){}},
     openContainer:()=>new Promise(r=>{resolve=r;}), stopDigging(){},clearControlStates(){},deactivateItem(){} };
   const e = new SkillExecutor(bot); e.start('LOOT_CONTAINER');

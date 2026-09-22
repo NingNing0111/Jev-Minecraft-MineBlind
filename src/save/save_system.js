@@ -3,10 +3,24 @@ const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 class SaveSystem {
   constructor(root, identity) { this.root = root; this.identity = identity; this.events = []; }
+  attachStorage(storage) { this.storage = storage; }
+  async flushEvents() {
+    if (!this.storage || !this.events.length) return;
+    const batch = this.events.splice(0);
+    try { await this.storage.request('events', batch); }
+    catch (error) { this.events = [...batch, ...this.events].slice(-1000); throw error; }
+  }
   log(type, data = {}) {
     // Snapshot mutable runtime objects at event time, not at the next save.
     try { this.events.push(JSON.parse(JSON.stringify({ timestamp: Date.now(), ...data, type }))); }
     catch (error) { this.events.push({ timestamp: Date.now(), type: 'log_error', error: error.message }); }
+    if (this.events.length > 1000) this.events.splice(0, this.events.length - 1000);
+  }
+  async savePersistent(snapshot, reason) {
+    await this.flushEvents();
+    const database = path.join(path.resolve(this.root), 'checkpoints', `${randomUUID()}.sqlite`);
+    await this.storage.request('checkpoint', { file: database });
+    return this.save({ ...snapshot, sqlite_memory: { file: path.relative(path.resolve(this.root), database) } }, reason);
   }
   save(snapshot, reason) {
     const date = new Date();
@@ -22,7 +36,7 @@ class SaveSystem {
     fs.renameSync(temp, dest);
     // A portable atomic pointer avoids symlink permission differences on Windows.
     for (const pointer of [path.join(dir, 'latest.json'), path.join(this.root, 'latest.json')]) {
-      fs.writeFileSync(`${pointer}.tmp`, JSON.stringify({ path: path.resolve(dest) }));
+      fs.writeFileSync(`${pointer}.tmp`, JSON.stringify({ path: path.relative(path.resolve(this.root), path.resolve(dest)) }));
       fs.renameSync(`${pointer}.tmp`, pointer);
     }
     return dest;
@@ -32,11 +46,16 @@ class SaveSystem {
       try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
       catch (error) { throw new Error(`Cannot restore ${file}: ${error.message}`); }
     };
-    const dir = selection === 'latest' ? read(path.join(this.root, 'latest.json')).path : selection;
+    const dir = selection === 'latest'
+      ? path.resolve(this.root, read(path.join(this.root, 'latest.json')).path)
+      : selection;
     const meta = read(path.join(dir, 'meta.json'));
     if (meta.version !== 1 || JSON.stringify(meta.identity) !== JSON.stringify(this.identity)) throw new Error('Save version/world/mode mismatch');
     const result = {};
     for (const key of ['run_memory', 'world_model', 'goal_manager', 'agent_plan']) result[key] = read(path.join(dir, `${key}.json`));
+    const memoryFile = path.join(dir, 'sqlite_memory.json');
+    this.restoredDatabase = fs.existsSync(memoryFile) ? path.resolve(this.root, read(memoryFile).file) : null;
+    if (this.restoredDatabase && !fs.existsSync(this.restoredDatabase)) throw new Error('Missing SQLite checkpoint');
     const logfile = path.join(dir, 'experiment_log.jsonl');
     try {
       if (fs.existsSync(logfile)) this.events = fs.readFileSync(logfile, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line));

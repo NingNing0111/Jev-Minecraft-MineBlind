@@ -20,7 +20,7 @@ COPY --from=dependencies --chown=node:node /app/node_modules ./node_modules
 COPY --chown=node:node package.json package-lock.json index.js ./
 COPY --chown=node:node src ./src
 COPY --chown=node:node public ./public
-RUN mkdir -p /app/saves /app/knowledge && chown node:node /app/saves /app/knowledge
+RUN mkdir -p /app/data/saves /app/data/knowledge && chown -R node:node /app/data
 USER node
 EXPOSE 3010 3011
 CMD ["node", "index.js"]

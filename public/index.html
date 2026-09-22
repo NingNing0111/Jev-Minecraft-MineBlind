@@ -14,7 +14,7 @@
       --danger: #ff4444;
       --warn: #ffaa00;
       --text: #e0e0e0;
-      --muted: #666;
+      --muted: #9aa6b5;
       --intent-color: #00ccff;
     }
 
@@ -23,10 +23,10 @@
     body {
       background: var(--bg);
       color: var(--text);
-      font-family: 'Courier New', monospace;
+      font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
       height: 100vh;
       display: grid;
-      grid-template-columns: 1fr 340px;
+      grid-template-columns: minmax(0, 1fr) 420px;
       grid-template-rows: auto 1fr auto;
       gap: 8px;
       padding: 8px;
@@ -274,6 +274,47 @@
       font-size: 0.72rem;
       margin-left: auto;
     }
+    /* Grouped Agent workspace */
+    .right-panel { min-height: 0; min-width: 0; overflow: hidden; }
+    .intent-card { flex-shrink: 0; background: linear-gradient(135deg, #17252b, #151c22); }
+    .intent-label { font-size: 1.3rem; }
+    .intent-reason { line-height: 1.6; overflow-wrap: anywhere; }
+    .tabs { display: flex; gap: 4px; flex-shrink: 0; padding: 4px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+    .tab { flex: 1; padding: 10px 2px; border: 0; border-radius: 5px; background: transparent; color: var(--muted); cursor: pointer; font: inherit; font-size: .78rem; }
+    .tab[aria-selected="true"] { color: var(--accent); background: #20342b; }
+    button:focus-visible, [role="tabpanel"]:focus-visible { outline: 2px solid var(--intent-color); outline-offset: 2px; }
+    .tab-panel { overflow-y: auto; min-height: 0; display: flex; flex-direction: column; gap: 10px; padding: 2px 4px 8px 0; }
+    [hidden] { display: none !important; }
+    .card-title { font-size: .73rem; letter-spacing: .5px; }
+    .plan-summary { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 12px; }
+    .badge { font-size: .7rem; color: var(--accent); background: #20342b; border-radius: 5px; padding: 4px 8px; }
+    .plan-copy { font-size: .83rem; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .muted { color: var(--muted); }
+    .goal-list { list-style: none; display: grid; gap: 8px; margin-top: 12px; }
+    .goal-item { padding: 12px; border: 1px solid var(--border); border-radius: 6px; background: #11181d; overflow-wrap: anywhere; }
+    .goal-item.current { border-color: var(--intent-color); background: #13252c; }
+    .goal-item.done { border-color: #315443; }
+    .goal-heading { display: flex; justify-content: space-between; gap: 8px; font-size: .73rem; color: var(--muted); margin-bottom: 6px; }
+    .goal-item.current .goal-heading { color: var(--intent-color); }
+    .goal-detail { font-size: .73rem; line-height: 1.6; margin-top: 6px; color: var(--muted); }
+    .goal-constraints { padding-left: 18px; }
+    .metrics-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .metric { background: #11181d; border-radius: 5px; padding: 10px; min-width: 0; }
+    .metric dt { font-size: .7rem; color: var(--muted); margin-bottom: 5px; }
+    .metric dd { font-size: 1rem; overflow-wrap: anywhere; }
+    .plan-progress { width: 100%; height: 7px; accent-color: var(--accent); }
+    .log-list { max-height: none; }
+    .log-entry { flex-wrap: wrap; padding: 10px 0; gap: 5px 8px; border-bottom-color: var(--border); }
+    .log-reason { flex-basis: 100%; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; }
+    #audioStatus { font-size: .72rem; color: var(--muted); line-height: 1.6; margin-top: 8px; }
+    #saveError { color: var(--warn); margin-top: 10px; }
+    @media (max-width: 1000px) { body { grid-template-columns: minmax(0, 1fr) 360px; } .header-info { gap: 10px; flex-wrap: wrap; } }
+    @media (max-width: 720px) {
+      body { height: auto; min-height: 100dvh; overflow: auto; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 38vh auto auto; }
+      header { flex-wrap: wrap; gap: 10px; } .header-info { width: 100%; margin: 0; }
+      .viewer-panel { grid-row: 2; } .right-panel { grid-row: 3; overflow: visible; }
+      .tab-panel { max-height: 65vh; } footer { flex-wrap: wrap; gap: 8px; }
+    }
   </style>
 </head>
 <body>
@@ -286,15 +327,15 @@
     <span>HP <strong id="hpVal">--</strong>/20</span>
     <span>食物 <strong id="foodVal">--</strong>/20</span>
     <span>威胁 <strong id="threatCount">0</strong></span>
-    <span>延迟 <strong id="latencyVal">--</strong>ms</span>
+    <span>延迟 <strong id="latencyVal">未提供</strong></span>
     <span>循环 <strong id="loopCount">0</strong></span>
   </div>
 </header>
 
 <!-- 3D Viewer -->
 <div class="viewer-panel">
-  <iframe id="viewer" src="https://performs-edt-bikini-headset.trycloudflare.com" title="Prismarine Viewer"></iframe>
-  <div class="viewer-overlay">🎮 Bot 第一人称视角 · performs-edt-bikini-headset.trycloudflare.com</div>
+  <iframe id="viewer" title="Prismarine Viewer"></iframe>
+  <div class="viewer-overlay" id="viewerAddress">🎮 Bot 第一人称视角</div>
 </div>
 
 <!-- Right Panel -->
@@ -309,6 +350,30 @@
     <div class="intent-source" id="intentSource"></div>
   </div>
 
+  <nav class="tabs" role="tablist" aria-label="Agent 信息分组">
+    <button class="tab" id="tab-plan" role="tab" aria-controls="panel-plan" aria-selected="true" tabindex="0">宏观规划</button>
+    <button class="tab" id="tab-state" role="tab" aria-controls="panel-state" aria-selected="false" tabindex="-1">实时状态</button>
+    <button class="tab" id="tab-log" role="tab" aria-controls="panel-log" aria-selected="false" tabindex="-1">决策日志</button>
+    <button class="tab" id="tab-controls" role="tab" aria-controls="panel-controls" aria-selected="false" tabindex="-1">控制台</button>
+  </nav>
+
+  <section class="tab-panel" id="panel-plan" role="tabpanel" aria-labelledby="tab-plan" tabindex="0">
+    <div class="card">
+      <div class="card-title">Agent · 宏观战略</div>
+      <div class="plan-summary"><strong>目标路线</strong><span class="badge" id="planStatus">等待规划</span></div>
+      <p class="plan-copy muted" id="planRationale">等待 Agent 下发宏观规划…</p>
+      <div class="goal-detail" id="planProgressText">暂无目标队列</div>
+      <progress class="plan-progress" id="planProgress" value="0" max="1" aria-label="当前规划目标完成进度"></progress>
+      <ol class="goal-list" id="goalList"></ol>
+    </div>
+    <div class="card">
+      <div class="card-title">运行指标 · 当前会话</div>
+      <dl class="metrics-grid" id="metricsGrid"></dl>
+      <p class="plan-copy" id="saveError" hidden></p>
+    </div>
+  </section>
+
+  <section class="tab-panel" id="panel-state" role="tabpanel" aria-labelledby="tab-state" tabindex="0" hidden>
   <!-- Player Status -->
   <div class="card">
     <div class="card-title">❤ 玩家状态</div>
@@ -347,10 +412,34 @@
     </div>
   </div>
 
+  <div class="card">
+    <div class="card-title">⛏ 周围资源</div>
+    <p class="goal-detail">当前已加载区域的感知结果；未发现不代表世界中不存在。</p>
+    <ul class="goal-list" id="nearbyResourceList" aria-label="周围资源"><li class="plan-copy muted">等待资源感知数据…</li></ul>
+  </div>
+  <div class="card">
+    <div class="card-title">🎒 背包资源</div>
+    <div class="plan-copy muted" id="inventoryList">等待状态数据…</div>
+  </div>
+  </section>
+
+  <section class="tab-panel" id="panel-log" role="tabpanel" aria-labelledby="tab-log" tabindex="0" hidden>
   <!-- Decision Log -->
   <div class="card">
     <div class="card-title">📋 决策日志</div>
-    <div class="log-list" id="logList"></div>
+    <div class="log-list" id="logList"><p class="plan-copy muted">暂无决策记录</p></div>
+  </div>
+
+  </section>
+
+  <section class="tab-panel" id="panel-controls" role="tabpanel" aria-labelledby="tab-controls" tabindex="0" hidden>
+  <!-- Game audio -->
+  <div class="card">
+    <div class="card-title">🔊 游戏声音</div>
+    <button class="btn" id="audioToggle" type="button">🔇 开启游戏声音</button>
+    <label for="audioVolume">音量</label>
+    <input id="audioVolume" type="range" min="0" max="100" value="70" aria-label="游戏音量">
+    <div id="audioStatus" role="status">点击开启 · 服务器声音事件 · Minecraft 1.20.1</div>
   </div>
 
   <!-- Controls -->
@@ -367,6 +456,7 @@
     </div>
   </div>
 
+  </section>
 </div>
 
 <!-- Footer -->
@@ -378,8 +468,14 @@
   <div id="paused-banner">⏸ AI 已暂停</div>
 </footer>
 
+<script src="/hud-format.js"></script>
+<script src="/viewer-url.js"></script>
+<script src="/game-audio.js"></script>
+<script src="/agent-dashboard.js"></script>
 <script>
   const socket = io();
+  GameAudio.attach(socket);
+  AgentDashboard.attach(document);
   let isPaused = false;
   let loopCount = 0;
   const INTENT_EMOJI = {
@@ -409,11 +505,16 @@
     document.getElementById('loopCount').textContent = loopCount;
 
     const { state, decision, log, ai_paused } = data;
+    AgentDashboard.render(document, data);
     if (!state) return;
 
     // 暂停标记
     if (ai_paused !== undefined) {
+      isPaused = ai_paused;
       document.getElementById('paused-banner').style.display = ai_paused ? 'block' : 'none';
+      const pauseButton = document.getElementById('btnPause');
+      pauseButton.textContent = isPaused ? '▶ 恢复 AI' : '⏸ 暂停 AI';
+      pauseButton.className = isPaused ? 'btn active' : 'btn';
     }
 
     // 玩家状态
@@ -479,16 +580,19 @@
 
     // 意图
     if (decision) {
-      const emoji = INTENT_EMOJI[decision.intent] || '❓';
-      const cls = INTENT_CLASS[decision.intent] || 'info';
-      document.getElementById('intentLabel').textContent = emoji + ' ' + decision.intent;
+      const display = HudFormat.action(decision.intent);
+      const emoji = INTENT_EMOJI[decision.intent] || display.icon;
+      const cls = INTENT_CLASS[decision.intent] || display.className;
+      document.getElementById('intentLabel').textContent = emoji + ' ' + display.label;
+      document.getElementById('intentLabel').title = decision.intent || 'Idle';
       document.getElementById('intentLabel').className = 'intent-label ' + cls;
       document.getElementById('intentReason').textContent = decision.reason || '';
-      document.getElementById('intentLatency').textContent = decision.latency + 'ms';
-      document.getElementById('latencyVal').textContent = decision.latency;
-      document.getElementById('intentSource').textContent =
-        decision.source === 'local' ? '📦 本地规则引擎' :
-        decision.source === 'forced' ? '🎛 手动强制' : '🤖 Jev AI';
+      const latencyLabel = decision.latencyScope === 'latest' ? '最近决策耗时' : '决策耗时';
+      const latencyText = decision.latency == null ? '等待首次决策' : HudFormat.latency(decision.latency);
+      document.getElementById('intentLatency').textContent = latencyLabel + '：' + latencyText;
+      document.getElementById('latencyVal').textContent = latencyText;
+      document.getElementById('latencyVal').title = latencyLabel + '（技能选择耗时，不含动作执行时间）';
+      document.getElementById('intentSource').textContent = HudFormat.source(decision.source);
     }
 
     // 时间
@@ -497,7 +601,7 @@
     document.getElementById('timeInfo').textContent = isDaytime ? '☀️ 白天' : '🌙 夜晚';
 
     // 决策日志
-    if (log && log.length) {
+    if (Array.isArray(log)) {
       const logEl = document.getElementById('logList');
       logEl.textContent = '';
       log.forEach(entry => {
@@ -510,9 +614,10 @@
           s.className = cls; s.textContent = txt; return s;
         };
         row.appendChild(mkSpan('log-time', timeStr));
-        row.appendChild(mkSpan('log-intent', entry.intent));
-        row.appendChild(mkSpan('log-reason', entry.reason));
-        row.appendChild(mkSpan('log-hp', '❤' + entry.hp));
+        row.appendChild(mkSpan('log-intent', HudFormat.action(entry.intent || entry.skill || entry.action).label));
+        row.appendChild(mkSpan('log-reason', HudFormat.detail(entry)));
+        if (Number.isFinite(entry.hp)) row.appendChild(mkSpan('log-hp', `❤${entry.hp}`));
+        row.title = [entry.intent || entry.skill || entry.action, HudFormat.source(entry.source), HudFormat.latency(entry.latency)].join(' · ');
         logEl.appendChild(row);
       });
     }

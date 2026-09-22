@@ -14,6 +14,9 @@ class RunMemory {
     this.data = { startedAt: Date.now(), deaths: 0, agentCalls: 0, agentErrors: 0,
       keyDecisions: 0, agentResolved: 0, autonomousIntervals: [], lastAgentAt: null,
       completedGoals: [], tokens: 0, victory: false, ...data };
+    this.data.intervalCount ??= this.data.autonomousIntervals.length;
+    this.data.intervalTotal ??= this.data.autonomousIntervals.reduce((a,b) => a+b, 0);
+    this.data.autonomousIntervals = this.data.autonomousIntervals.slice(-40);
   }
   update(observation) {
     this.data.inventory = observation.inventory;
@@ -23,15 +26,20 @@ class RunMemory {
   }
   agentCalled(now = Date.now()) {
     this.data.agentCalls++;
-    if (this.data.lastAgentAt !== null) this.data.autonomousIntervals.push(now - this.data.lastAgentAt);
+    if (this.data.lastAgentAt !== null) {
+      const interval = now - this.data.lastAgentAt;
+      this.data.intervalCount++; this.data.intervalTotal += interval;
+      this.data.autonomousIntervals.push(interval);
+      this.data.autonomousIntervals = this.data.autonomousIntervals.slice(-40);
+    }
     this.data.lastAgentAt = now;
   }
   metrics(now = Date.now()) {
-    const d = this.data, xs = d.autonomousIntervals;
+    const d = this.data;
     return { elapsedMs: now - d.startedAt, deaths: d.deaths, agentCalls: d.agentCalls,
       agentErrors: d.agentErrors, tokens: d.tokens, completed: d.victory,
       agentDependencyRatio: d.keyDecisions ? d.agentResolved / d.keyDecisions : null,
-      meanAutonomousHorizonMs: xs.length ? xs.reduce((a,b) => a+b, 0) / xs.length : null };
+      meanAutonomousHorizonMs: d.intervalCount ? d.intervalTotal / d.intervalCount : null };
   }
 }
 class WorldModel {
@@ -52,6 +60,27 @@ class WorldModel {
     }
     this.previous = { dimension: o.dimension, position: p };
     return { new_chunks_visited: this.chunks.size, distance_travelled: this.distance, fresh };
+  }
+  async updatePersistent(o, storage) {
+    const p = o.player.position;
+    const key = `${o.dimension}:${Math.floor(p.x / 16)},${Math.floor(p.z / 16)}`;
+    let fresh = false;
+    if (key !== this.lastChunkKey) {
+      const result = await storage.request('visit', { dimension: o.dimension, x: Math.floor(p.x / 16), z: Math.floor(p.z / 16) });
+      this.chunkCount = result.count; fresh = result.fresh; this.lastChunkKey = key;
+    }
+    if (this.previous?.dimension === o.dimension) {
+      const q = this.previous.position;
+      this.distance += Math.hypot(p.x-q.x,p.y-q.y,p.z-q.z);
+    }
+    this.previous = { dimension: o.dimension, position: p };
+    return { new_chunks_visited: this.chunkCount || 0, distance_travelled: this.distance, fresh };
+  }
+  decisionContext() {
+    return { structures: this.data.structures.slice(-32),
+      locations: Object.fromEntries(Object.entries(this.data.locations).slice(-32)),
+      visited_chunk_count: this.chunkCount ?? this.chunks.size,
+      danger_zones: this.data.danger_zones.slice(-16), resource_zones: this.data.resource_zones.slice(-16) };
   }
   snapshot() { return { ...this.data, chunks: [...this.chunks] }; }
 }

@@ -1,12 +1,16 @@
 const { goals } = require('mineflayer-pathfinder');
 const { Vec3 } = require('vec3');
 const { SKILLS } = require('../jev/client');
+const { collect } = require('./collect');
+const { craft } = require('./crafting');
+const { Exploration } = require('../exploration');
 class SkillError extends Error {
   constructor(message, code = 'GOAL_UNACTIONABLE') { super(message); this.code = code; }
 }
 class SkillExecutor {
-  constructor(bot, report = () => {}) {
+  constructor(bot, report = () => {}, exploration = new Exploration(), containerMemory = null) {
     this.bot = bot; this.report = report; this.current = null; this.sequence = 0;
+    this.exploration = exploration; this.containerMemory = containerMemory;
   }
   get busy() { return this.current !== null; }
   cancel(reason = 'interrupted') {
@@ -17,6 +21,13 @@ class SkillExecutor {
   }
   start(skill, params = {}) {
     if (this.busy) return false;
+    if (this.guard && !['EAT','WATER','FLEE'].includes(skill)) {
+      const verdict = this.guard.check(skill, params);
+      if (!verdict.ok) {
+        if (!verdict.cached) this.report({ type: 'skill_failed', skill, params, code: verdict.code, error: verdict.reason });
+        return false;
+      }
+    }
     if (!SKILLS.includes(skill) && !['EAT','WATER'].includes(skill)) throw new SkillError(`Unknown skill ${skill}`);
     const task = { id: ++this.sequence, skill, params, cancelled: false, startedAt: Date.now() };
     this.current = task;
@@ -37,7 +48,38 @@ class SkillExecutor {
   async step(t, operation) { this.check(t); const result = await operation(); this.check(t); return result; }
   async navigate(t, position, radius = 2) {
     if (!position || !['x','y','z'].every(k => Number.isFinite(position[k]))) throw new SkillError('Missing navigation coordinates');
-    return this.step(t, () => this.bot.pathfinder.goto(new goals.GoalNear(position.x, position.y, position.z, radius)));
+    return this.move(t, new goals.GoalNear(position.x, position.y, position.z, radius));
+  }
+  async move(t, goal) {
+    let last = this.bot.entity.position.clone();
+    let timer;
+    const stalled = new Promise((_, reject) => {
+      timer = setInterval(() => {
+        const current = this.bot.entity.position;
+        if (current.distanceTo(last) < 0.5) {
+          reject(new SkillError('Navigation made no progress for 8 seconds', 'STUCK'));
+          this.bot.pathfinder.setGoal(null);
+        }
+        last = current.clone();
+      }, 8000);
+    });
+    try { return await this.step(t, () => Promise.race([this.bot.pathfinder.goto(goal), stalled])); }
+    finally { clearInterval(timer); }
+  }
+  async explore(t) {
+    // Revalidate against live local observations, including resumed actions after a reflex.
+    const info = this.exploration.observe(this.bot, t.params.target || '');
+    const destination = info.destination;
+    if (!destination) throw new SkillError('No safe loaded frontier; reassess the goal or terrain', 'GOAL_UNACTIONABLE');
+    t.explorationPosition = destination.position;
+    try {
+      await this.navigate(t, destination.position, 3);
+      this.exploration.finish(destination.position);
+      return { explored: destination.position, purpose: info.purpose, reason: destination.reason };
+    } catch (error) {
+      this.exploration.finish(destination.position, !t.cancelled || t.reason === 'timeout');
+      throw error;
+    }
   }
   async execute(t) {
     const b = this.bot, p = t.params, pos = b.entity.position;
@@ -45,8 +87,7 @@ class SkillExecutor {
     switch (t.skill) {
       case 'NAVIGATE_TO': return this.navigate(t, p.position);
       case 'EXPLORE_AREA': {
-        const angle = (this.sequence * 2.399963229728653);
-        return this.navigate(t, { x: pos.x + Math.cos(angle)*24, y: pos.y, z: pos.z + Math.sin(angle)*24 }, 3);
+        return this.explore(t);
       }
       case 'SEARCH_STRUCTURE': {
         // Local block evidence only: no privileged /locate or hidden world data.
@@ -56,34 +97,11 @@ class SkillExecutor {
         const id = b.registry.blocksByName[name]?.id;
         const block = id === undefined ? null : b.findBlock({ matching: id, maxDistance: 64 });
         if (block) { await this.navigate(t, block.position); return { structure: p.target, position: block.position }; }
-        const angle = this.sequence * 2.399963229728653;
-        await this.navigate(t, { x: pos.x+Math.cos(angle)*32, y: pos.y, z: pos.z+Math.sin(angle)*32 }, 3);
+        await this.explore(t);
         return { searched: true }; // Never claim structure discovery from travel alone.
       }
-      case 'MINE_RESOURCE': {
-        const blockId = b.registry.blocksByName[p.target]?.id;
-        if (blockId === undefined) throw new SkillError(`${p.target} is not a mineable block; crafting/smelting/loot may be required`, 'KNOWLEDGE_GAP');
-        const block = b.findBlock({ matching: blockId, maxDistance: 48 });
-        if (!block) throw new SkillError(`No visible ${p.target}; explore first`);
-        await this.navigate(t, block.position, 2);
-        const tool = b.pathfinder.bestHarvestTool(block);
-        if (tool) await this.step(t, () => b.equip(tool, 'hand'));
-        if (!block.canHarvest(b.heldItem?.type ?? null)) throw new SkillError('Required harvest tool missing');
-        await this.step(t, () => b.dig(block));
-        await this.navigate(t, block.position, 1);
-        return { mined: block.name }; // Inventory observation, not this return, completes the goal.
-      }
-      case 'CRAFT_ITEM': {
-        const item = b.registry.itemsByName[p.target];
-        if (!item) throw new SkillError(`Unknown item ${p.target}`);
-        const tableId = b.registry.blocksByName.crafting_table.id;
-        const table = b.findBlock({ matching: tableId, maxDistance: 16 });
-        if (table) await this.navigate(t, table.position);
-        const recipe = b.recipesFor(item.id, null, 1, table)[0];
-        if (!recipe) throw new SkillError(`Missing recipe ingredients or crafting table for ${p.target}`);
-        await this.step(t, () => b.craft(recipe, 1, table));
-        return { crafted: p.target };
-      }
+      case 'MINE_RESOURCE': return collect(this, t);
+      case 'CRAFT_ITEM': return craft(this, t);
       case 'FIGHT_MOB': {
         const target = Object.values(b.entities).filter(e => e !== b.entity && e.name === p.target)
           .sort((a,c) => pos.distanceTo(a.position)-pos.distanceTo(c.position))[0];
@@ -105,19 +123,44 @@ class SkillExecutor {
         return this.navigate(t, pos.offset(away.x*12,0,away.z*12), 2);
       }
       case 'LOOT_CONTAINER': {
-        const chestId = b.registry.blocksByName.chest.id;
-        const chest = b.findBlock({ matching: chestId, maxDistance: 24 });
-        if (!chest) throw new SkillError('No visible chest');
+        // 搜索所有容器类型：chest / trapped_chest / barrel
+        const containerIds = ['chest', 'trapped_chest', 'barrel']
+          .map(n => b.registry.blocksByName[n]?.id)
+          .filter(id => id !== undefined);
+        let chest = null;
+        let closestDist = Infinity;
+        for (const id of containerIds) {
+          const found = b.findBlock({ matching: id, maxDistance: 24 });
+          if (found) {
+            const d = pos.distanceTo(found.position);
+            if (d < closestDist) { closestDist = d; chest = found; }
+          }
+        }
+        if (!chest) throw new SkillError('No visible chest or barrel');
         await this.navigate(t, chest.position);
         this.check(t);
         const container = await b.openContainer(chest);
+        let lootedItems = [];
         try {
           this.check(t);
-          for (const item of container.containerItems()) {
-            if (!p.target || item.name === p.target) await this.step(t, () => container.withdraw(item.type, item.metadata, item.count));
+          const items = container.containerItems();
+          // 记录箱子内容快照（开箱前保存，内容不依赖取物成功与否）
+          if (this.containerMemory) {
+            this.containerMemory.record(chest.position, chest.name, items, String(b.game?.dimension || 'overworld'));
           }
-        } finally { container.close(); }
-        return { looted: true };
+          for (const item of items) {
+            if (!p.target || item.name === p.target) {
+              await this.step(t, () => container.withdraw(item.type, item.metadata, item.count));
+              lootedItems.push({ name: item.name, count: item.count });
+            }
+          }
+        } finally {
+          try {
+            if (this.containerMemory && !t.cancelled) this.containerMemory.record(chest.position, chest.name,
+              container.containerItems(), String(b.game?.dimension || 'overworld'));
+          } finally { container.close(); }
+        }
+        return { looted: true, items: lootedItems, container_pos: chest.position };
       }
       case 'BUILD_PORTAL': {
         if (!['nether', 'the_nether', 'minecraft:the_nether'].includes(p.target))

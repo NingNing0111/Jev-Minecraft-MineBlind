@@ -13,10 +13,10 @@ set -euo pipefail
 
 # ── 路径配置 ──────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-MC_DIR="/root/mc-server"
+MC_DIR="$SCRIPT_DIR/data/minecraft"
 BOT_DIR="$SCRIPT_DIR"
-PID_DIR="$SCRIPT_DIR/.pids"
-LOG_DIR="$SCRIPT_DIR/.logs"
+PID_DIR="$SCRIPT_DIR/data/pids"
+LOG_DIR="$SCRIPT_DIR/data/logs"
 
 BOT_PID_FILE="$PID_DIR/bot.pid"
 CF_HUD_PID_FILE="$PID_DIR/cf_hud.pid"

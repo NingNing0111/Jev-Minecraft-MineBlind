@@ -38,6 +38,13 @@ class GoalManager {
     if (bot.recipesFor(item.id, null, 1, table).length) return { skill: 'CRAFT_ITEM', target, amount };
     // Recipe deltas supply local prerequisites; the strategic agent never emits these steps.
     const recipes = bot.recipesAll(item.id, null, true);
+    const hasIngredients = recipe => recipe.delta.filter(d => d.count < 0).every(d =>
+      (inventory[bot.registry.items[d.id]?.name] || 0) >= -d.count);
+    // Prefer an already supplied recipe over another wood variant's missing ingredients.
+    if (!table && recipes.some(recipe => recipe.requiresTable && hasIngredients(recipe))) {
+      if (inventory.crafting_table > 0) return { skill: 'CRAFT_ITEM', target, amount };
+      return this.acquire('crafting_table', 1, inventory, bot, seen);
+    }
     for (const recipe of recipes) {
       const missing = recipe.delta.filter(d => d.count < 0 && (inventory[bot.registry.items[d.id]?.name] || 0) < -d.count);
       if (missing.length) {

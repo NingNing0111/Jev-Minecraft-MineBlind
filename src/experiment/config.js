@@ -1,3 +1,5 @@
+const path = require('node:path');
+const projectRoot = path.resolve(__dirname, '../..');
 const MODES = {
   A: { agent: false, gate: false, web: false, memory: false },
   B: { agent: true, gate: false, web: false, memory: false },
@@ -14,9 +16,9 @@ function config(env = process.env) {
     return n;
   };
   const provider = env.AGENT_PROVIDER || 'mastra';
-  if (!['mastra', 'openai-responses'].includes(provider)) throw new Error('AGENT_PROVIDER must be mastra or openai-responses');
+  if (!['mastra', 'openai-responses', 'openai-chat'].includes(provider)) throw new Error('AGENT_PROVIDER must be mastra, openai-responses or openai-chat');
   let baseURL;
-  if (provider === 'openai-responses') {
+  if (provider !== 'mastra') {
     baseURL = (env.AGENT_BASE_URL || 'https://ai-gateway.pgthinker.me/v1').replace(/\/+$/, '');
     let url;
     try { url = new URL(baseURL); } catch { throw new Error('Invalid AGENT_BASE_URL'); }
@@ -25,10 +27,11 @@ function config(env = process.env) {
     }
   }
   const result = { mode, ...MODES[mode], provider, baseURL,
-    model: env.AGENT_MODEL || (provider === 'openai-responses' ? 'gemini-3.8-flash-high' : 'openai/gpt-4.1'),
+    model: env.AGENT_MODEL || (provider !== 'mastra' ? 'gemini-3.8-flash-high' : 'openai/gpt-4.1'),
     decisionMs: positive('DECISION_INTERVAL_MS', 1000), stagnationMs: positive('STAGNATION_MS', 120000),
     saveMs: positive('SAVE_INTERVAL_MS', 300000), agentCooldownMs: positive('AGENT_COOLDOWN_MS', 30000),
-    saveRoot: env.SAVE_DIR || 'saves', knowledgeRoot: env.KNOWLEDGE_DIR || 'knowledge',
+    saveRoot: path.resolve(projectRoot, env.SAVE_DIR || 'data/saves'),
+    knowledgeRoot: path.resolve(projectRoot, env.KNOWLEDGE_DIR || 'data/knowledge'),
     restore: env.RESTORE_SAVE || '', worldId: env.WORLD_ID || `${env.MC_HOST || 'localhost'}:${env.MC_PORT || 25565}` };
   // Do not serialize credentials when config is included in logs or snapshots.
   Object.defineProperty(result, 'apiKey', { value: env.AGENT_API_KEY || '', enumerable: false });

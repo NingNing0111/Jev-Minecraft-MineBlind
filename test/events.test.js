@@ -45,6 +45,23 @@ test('lifecycle supersedes stale events and cancelled planning is not a provider
   assert.equal(r.events.items.size, 1);
   assert.equal(r.events.peek().type, 'dimension_change');
 });
+test('ungated mode throttles failures and same-tick help with bounded backoff', async t => {
+  const r = runtime(t); r.config.gate = false;
+  let calls = 0;
+  r.planner = { plan: async () => { calls++; throw new Error('provider unavailable'); } };
+  assert.equal(await r.replan('startup', {}, r.epoch), false);
+  assert.equal(await r.replan('GOAL_UNACTIONABLE', {}, r.epoch, {}), false);
+  assert.equal(calls, 1);
+  assert.equal(r.agentError, 'provider unavailable');
+  assert.ok(r.nextAgent > Date.now());
+  r.nextAgent = 0;
+  const before = Date.now();
+  await r.replan('startup', {}, r.epoch);
+  assert.equal(calls, 2);
+  assert.ok(r.nextAgent >= before + r.config.agentCooldownMs * 2);
+  assert.equal(r.events.has('startup'), true);
+});
+
 test('event wakeups coalesce, never overlap ticks, and listeners detach on stop', async t => {
   const r = runtime(t); r.config.decisionMs = 10000;
   let calls = 0; let release;

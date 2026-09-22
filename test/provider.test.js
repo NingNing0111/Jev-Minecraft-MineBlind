@@ -44,6 +44,28 @@ test('Responses adapter sends exact model, auth, schema and tools to /responses 
   assert.equal(result.content[0].text, '{"ok":true}');
 });
 
+test('Chat adapter sends exact model, credentials and schema to /chat/completions', async () => {
+  const c = custom({ AGENT_PROVIDER: 'openai-chat' });
+  assert.equal(c.model, 'gemini-3.8-flash-high');
+  const model = createAgentModel(c, { fetch: async (url, init) => {
+    assert.equal(String(url), 'https://ai-gateway.pgthinker.me/v1/chat/completions');
+    assert.equal(new Headers(init.headers).get('authorization'), 'Bearer offline-test-key');
+    const body = JSON.parse(init.body);
+    assert.equal(body.model, c.model);
+    assert.equal(body.response_format.type, 'json_schema');
+    return Response.json({ id: 'chat_test', created: 1, model: body.model,
+      choices: [{ index: 0, message: { role: 'assistant', content: '{"ok":true}' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } });
+  } });
+  const result = await model.doGenerate({
+    prompt: [{ role: 'user', content: [{ type: 'text', text: 'Plan' }] }],
+    responseFormat: { type: 'json', schema: { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'], additionalProperties: false } },
+  });
+  assert.equal(result.content[0].text, '{"ok":true}');
+  const planner = createPlanner(c, null, { fetch: () => { throw new Error('Unexpected network'); } });
+  assert.equal((await planner.agent.getModel()).provider, 'openai.chat');
+});
+
 test('Mastra accepts the custom Responses model without any network call', async () => {
   const planner = createPlanner(custom(), null, { fetch: () => { throw new Error('Unexpected network call'); } });
   const model = await planner.agent.getModel();

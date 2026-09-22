@@ -11,6 +11,7 @@ const path = require('path');
 
 let io = null;
 let httpServer = null;
+let detachGameAudio = null;
 
 /**
  * 启动监控服务器
@@ -24,11 +25,14 @@ function startServer(bot) {
     cors: { origin: '*' },
   });
 
+  require('./sound-assets').createSoundAssets().routes(app);
+  detachGameAudio = require('./game-audio').attachGameAudio(bot, io);
+
   // 静态文件服务
   app.use(express.static(path.join(__dirname, '..', 'public')));
 
   // API: 获取当前状态（REST 备用）
-  app.get('/api/status', (req, res) => {
+  app.get('/api/status', (_req, res) => {
     res.json(latestBroadcast || {});
   });
 
@@ -61,6 +65,8 @@ function startServer(bot) {
 
   // 启动 Prismarine-Viewer
   try {
+    require('./viewer-smoothing').installViewerSmoothing();
+    require('./viewer-hand').installViewerHand();
     const { mineflayer: mineflayerViewer } = require('prismarine-viewer');
     mineflayerViewer(bot, { port: VIEWER_PORT, firstPerson: true });
     console.log(`[Server] 3D 视角 Prismarine-Viewer: http://localhost:${VIEWER_PORT}`);
@@ -115,6 +121,8 @@ function handleControlCommand(bot, cmd, socket) {
 }
 
 async function stopServer(bot) {
+  detachGameAudio?.();
+  detachGameAudio = null;
   bot?.viewer?.close?.();
   if (io) { await new Promise(resolve => io.close(resolve)); io = null; }
   if (httpServer?.listening) await new Promise(resolve => httpServer.close(resolve));
