@@ -74,6 +74,7 @@ function startServer(bot) {
 
   // 启动 Prismarine-Viewer
   try {
+    require('./viewer-live').installViewerLive();
     require('./viewer-smoothing').installViewerSmoothing();
     require('./viewer-hand').installViewerHand();
     require('./viewer-entities').installViewerEntities();
